@@ -1,3 +1,14 @@
+## 3.0.0
+
+Released as `in_pub`.
+
+## 2.0.1-dev.0 (not released)
+
+- Fix archive download links on detail pages 
+- Add json api end-point with versions list
+- Add reverse proxy deploy support, fixed issue #59
+- Implementing null safety in app.serve
+
 ## 2.0.0
 
 - Supports NNBD
