@@ -1,6 +1,7 @@
 ## 3.1.0 
 
 - Add endpoint to remove a package version.
+- Fix: invalid name for dart file in bin/.
 
 ## 3.0.0
 
