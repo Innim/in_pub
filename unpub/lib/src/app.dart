@@ -395,6 +395,39 @@ class App {
     return _successMessage('uploader removed');
   }
 
+  @Route.delete('/api/packages/<name>/versions/<version>')
+  Future<shelf.Response> removeVersion(
+      shelf.Request req, String name, String version) async {
+    try {
+      version = Uri.decodeComponent(version);
+    } catch (err) {
+      print(err);
+    }
+
+    var operatorEmail = await _getUploaderEmail(req);
+    var package = await metaStore.queryPackage(name);
+
+    if (package == null) {
+      return _badRequest('package not found', status: HttpStatus.notFound);
+    }
+    if (package.uploaders?.contains(operatorEmail) == false) {
+      return _badRequest('no permission', status: HttpStatus.forbidden);
+    }
+
+    var packageVersion =
+        package.versions.firstWhereOrNull((item) => item.version == version);
+    if (packageVersion == null) {
+      return _badRequest('version not found', status: HttpStatus.notFound);
+    }
+    if (package.versions.length == 1) {
+      return _badRequest('cannot remove the last version of a package');
+    }
+
+    await metaStore.removeVersion(name, version);
+    await packageStore.delete(name, version);
+    return _successMessage('version removed');
+  }
+
   @Route.get('/webapi/packages')
   Future<shelf.Response> getPackages(shelf.Request req) async {
     var params = req.requestedUri.queryParameters;

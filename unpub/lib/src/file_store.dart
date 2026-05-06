@@ -25,4 +25,12 @@ class FileStore extends PackageStore {
   Stream<List<int>> download(String name, String version) {
     return _getTarballFile(name, version).openRead();
   }
+
+  @override
+  Future<void> delete(String name, String version) async {
+    var file = _getTarballFile(name, version);
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
 }

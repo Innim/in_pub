@@ -61,6 +61,12 @@ class MongoStore extends MetaStore {
   }
 
   @override
+  removeVersion(name, version) async {
+    await db.collection(packageCollection).update(
+        _selectByName(name), modify.pull('versions', {'version': version}));
+  }
+
+  @override
   increaseDownloads(name, version) {
     var today = DateFormat('yyyyMMdd').format(DateTime.now());
     db

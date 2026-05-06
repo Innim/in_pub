@@ -20,6 +20,8 @@ Router _$AppRouter(App service) {
   router.add('POST', r'/api/packages/<name>/uploaders', service.addUploader);
   router.add('DELETE', r'/api/packages/<name>/uploaders/<email>',
       service.removeUploader);
+  router.add('DELETE', r'/api/packages/<name>/versions/<version>',
+      service.removeVersion);
   router.add('GET', r'/webapi/packages', service.getPackages);
   router.add('GET', r'/packages/<name>.json', service.getPackageVersions);
   router.add(
