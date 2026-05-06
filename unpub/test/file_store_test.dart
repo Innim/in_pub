@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:chunked_stream/chunked_stream.dart';
 import 'package:path/path.dart' as path;
 import 'package:test/test.dart';
-import 'package:unpub/unpub.dart' as unpub;
+import 'package:in_pub/in_pub.dart' as in_pub;
 
 //test gzip data
 const TEST_PKG_DATA = [
@@ -14,7 +14,7 @@ const TEST_PKG_DATA = [
 main() {
   test('upload-download-default-path', () async {
     var baseDir = _setup_fixture('upload-download-default-path');
-    var store = unpub.FileStore(baseDir.path);
+    var store = in_pub.FileStore(baseDir.path);
     await store.upload('test_package', '1.0.0', TEST_PKG_DATA);
     var pkg2 = await readByteStream(store.download('test_package', '1.0.0'));
     expect(pkg2, TEST_PKG_DATA);
@@ -25,7 +25,7 @@ main() {
 
   test('upload-download-custom-path', () async {
     var baseDir = _setup_fixture('upload-download-custom-path');
-    var store = unpub.FileStore(baseDir.path, getFilePath: newFilePathFunc());
+    var store = in_pub.FileStore(baseDir.path, getFilePath: newFilePathFunc());
     await store.upload('test_package', '1.0.0', TEST_PKG_DATA);
     var pkg2 = await readByteStream(store.download('test_package', '1.0.0'));
     expect(pkg2, TEST_PKG_DATA);

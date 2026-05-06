@@ -7,7 +7,7 @@ Since Dart 2.15:
 1. The `accessToken` is only sent to https://pub.dev and https://pub.dartlang.org. See [dart-lang/pub #3007](https://github.com/dart-lang/pub/pull/3007) for details.
 2. Since Dart 2.15, the third-party pub's token is stored at `/Users/username/Library/Application Support/dart/pub-tokens.json` (macOS)
 
-So the self-hosted pub server should have its own auth flow. unpub is using Google OAuth2 by default.
+So the self-hosted pub server should have its own auth flow. in_pub is using Google OAuth2 by default.
 
 - `unpub_auth login` will generate `unpub-credentials.json` locally after developer login the `unpub_auth`.
 - Before calling `dart pub publish` or `flutter pub publish`, please call `unpub_auth get | dart pub token add <self-hosted-pub-server>` first.
@@ -18,7 +18,7 @@ So the self-hosted pub server should have its own auth flow. unpub is using Goog
 
 ### Overview
 
-unpub is using Google OAuth2 by default. There's two situations where the unpub_auth can be used.
+in_pub is using Google OAuth2 by default. There's two situations where the unpub_auth can be used.
 
 - Login locally, and publish pub packages locally.
   1. Call `unpub_auth login` when you first use it, and it will save credentials locally.

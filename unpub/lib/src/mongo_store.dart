@@ -1,6 +1,6 @@
 import 'package:mongo_dart/mongo_dart.dart';
 import 'package:intl/intl.dart';
-import 'package:unpub/src/models.dart';
+import 'package:in_pub/src/models.dart';
 import 'meta_store.dart';
 
 final packageCollection = 'packages';

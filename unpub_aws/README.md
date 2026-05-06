@@ -11,12 +11,12 @@ A collection of modules to use for deploying unpub into AWS infrastructure.
 Use AWS S3 or another S3 API compatible endpoint as your file storage.
 
 ```dart
-import 'package:unpub/unpub.dart' as unpub;
-import 'package:unpub/' as unpub_aws;
+import 'package:in_pub/in_pub.dart' in_pub;
+import 'package:in_pub/' as unpub_aws;
 
-var app = unpub.App(
+var app = in_pub.App(
   // ...
-  packageStore: unpub.S3Store('your-bucket-name'),
+  packageStore: in_pub.S3Store('your-bucket-name'),
 );
 ```
 
@@ -39,7 +39,7 @@ Kitchen Sink Example:
 
 ```dart
 import 'package:mongo_dart/mongo_dart.dart';
-import 'package:unpub/unpub.dart' as unpub;
+import 'package:in_pub/in_pub.dart' as in_pub;
 import 'package:unpub_aws/src/aws_credentials.dart';
 import 'package:unpub_aws/unpub_aws.dart' as unpub_aws;
 
@@ -47,8 +47,8 @@ main(List<String> args) async {
   final db = Db('mongodb://localhost:27017/dart_pub');
   await db.open(); // make sure the MongoDB connection opened
 
-  final app = unpub.App(
-    metaStore: unpub.MongoStore(db),
+  final app = in_pub.App(
+    metaStore: in_pub.MongoStore(db),
     packageStore: unpub_aws.S3Store('my-bucket-name',
 
         // We attempt to find region from AWS_DEFAULT_REGION. If one is not

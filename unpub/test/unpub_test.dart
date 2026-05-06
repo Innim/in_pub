@@ -1,13 +1,13 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:collection/collection.dart';
-import 'package:unpub/src/utils.dart';
+import 'package:in_pub/src/utils.dart';
 import 'package:test/test.dart';
 import 'package:path/path.dart' as path;
 import 'package:http/http.dart' as http;
 import 'package:mongo_dart/mongo_dart.dart';
 import 'utils.dart';
-import 'package:unpub/unpub.dart';
+import 'package:in_pub/in_pub.dart';
 
 main() {
   Db _db = Db('mongodb://localhost:27017/dart_pub_test');
@@ -366,7 +366,7 @@ main() {
               ..followRedirects = false);
         expect(res.statusCode, HttpStatus.found);
         expect(res.headers[HttpHeaders.locationHeader],
-            'https://img.shields.io/static/v1?label=unpub&message=0.0.1&color=orange');
+            'https://img.shields.io/static/v1?label=in_pub&message=0.0.1&color=orange');
       });
 
       test('>=1.0.0', () async {
@@ -377,7 +377,7 @@ main() {
               ..followRedirects = false);
         expect(res.statusCode, HttpStatus.found);
         expect(res.headers[HttpHeaders.locationHeader],
-            'https://img.shields.io/static/v1?label=unpub&message=1.0.0&color=blue');
+            'https://img.shields.io/static/v1?label=in_pub&message=1.0.0&color=blue');
       });
 
       test('package not exists', () async {

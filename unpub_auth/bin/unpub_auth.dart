@@ -37,8 +37,9 @@ void main(List<String> arguments) async {
       flow = unpub_auth.Flow.getToken;
       break;
     default:
-      stdout.write(format('''
-An auth tool for unpub. unpub is using Google OAuth2 by default. There's two situations where the unpub_auth can be used.
+      stdout.write(
+        format('''
+An auth tool for in_pub. in_pub is using Google OAuth2 by default. There's two situations where the unpub_auth can be used.
 
 {@yellow}1. Login locally, and publish pub packages locally.{@end}
   {@blue}step 1.{@end} Call `unpub_auth login` when you first use it, and it will save credentials locally.
@@ -58,7 +59,8 @@ Available commands:
   {@green}login{@end}           Login unpub_auth on Google APIs.
   {@green}logout{@end}          Delete local credentials file.
   {@green}migrate{@end} {@green}<path>{@end}  Migrate existed credentials file from path.
-'''));
+'''),
+      );
       exit(0);
   }
 

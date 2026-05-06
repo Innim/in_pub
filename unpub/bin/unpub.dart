@@ -2,7 +2,7 @@ import 'dart:io';
 import 'package:path/path.dart' as path;
 import 'package:args/args.dart';
 import 'package:mongo_dart/mongo_dart.dart';
-import 'package:unpub/unpub.dart' as unpub;
+import 'package:in_pub/in_pub.dart' as in_pub;
 
 main(List<String> args) async {
   var parser = ArgParser();
@@ -30,11 +30,11 @@ main(List<String> args) async {
 
   var baseDir = path.absolute('unpub-packages');
 
-  var app = unpub.App(
-    metaStore: unpub.MongoStore(db),
-    packageStore: unpub.FileStore(baseDir),
-    proxy_origin: proxy_origin.trim().isEmpty ? null : Uri.parse(proxy_origin)
-  );
+  var app = in_pub.App(
+      metaStore: in_pub.MongoStore(db),
+      packageStore: in_pub.FileStore(baseDir),
+      proxy_origin:
+          proxy_origin.trim().isEmpty ? null : Uri.parse(proxy_origin));
 
   var server = await app.serve(host, port);
   print('Serving at http://${server.address.host}:${server.port}');

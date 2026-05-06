@@ -12,10 +12,10 @@ import 'package:shelf_cors_headers/shelf_cors_headers.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:pub_semver/pub_semver.dart' as semver;
 import 'package:archive/archive.dart';
-import 'package:unpub/src/models.dart';
-import 'package:unpub/unpub_api/lib/models.dart';
-import 'package:unpub/src/meta_store.dart';
-import 'package:unpub/src/package_store.dart';
+import 'package:in_pub/src/models.dart';
+import 'package:in_pub/unpub_api/lib/models.dart';
+import 'package:in_pub/src/meta_store.dart';
+import 'package:in_pub/src/package_store.dart';
 import 'utils.dart';
 import 'static/index.html.dart' as index_html;
 import 'static/main.dart.js.dart' as main_dart_js;
@@ -43,7 +43,7 @@ class App {
 
   /// validate if the package can be published
   ///
-  /// for more details, see: https://github.com/bytedance/unpub#package-validator
+  /// for more details, see: https://github.com/Innim/in_pub#package-validator
   final Future<void> Function(
       Map<String, dynamic> pubspec, String uploaderEmail)? uploadValidator;
 
@@ -135,7 +135,8 @@ class App {
     var name = item.pubspec['name'] as String;
     var version = item.version;
     return {
-      'archive_url': _resolveUrl(req, '/packages/$name/versions/$version.tar.gz'),
+      'archive_url':
+          _resolveUrl(req, '/packages/$name/versions/$version.tar.gz'),
       'pubspec': item.pubspec,
       'version': version,
     };
@@ -163,9 +164,8 @@ class App {
           semver.Version.parse(a.version), semver.Version.parse(b.version));
     });
 
-    var versionMaps = package.versions
-        .map((item) => _versionToJson(item, req))
-        .toList();
+    var versionMaps =
+        package.versions.map((item) => _versionToJson(item, req)).toList();
 
     return _okWithJson({
       'name': name,
@@ -228,8 +228,7 @@ class App {
   @Route.get('/api/packages/versions/new')
   Future<shelf.Response> getUploadUrl(shelf.Request req) async {
     return _okWithJson({
-      'url': _resolveUrl(req, '/api/packages/versions/newUpload')
-          .toString(),
+      'url': _resolveUrl(req, '/api/packages/versions/newUpload').toString(),
       'fields': {},
     });
   }
@@ -342,9 +341,11 @@ class App {
       await metaStore.addVersion(name, unpubVersion);
 
       // TODO: Upload docs
-      return shelf.Response.found(_resolveUrl(req, '/api/packages/versions/newUploadFinish'));
+      return shelf.Response.found(
+          _resolveUrl(req, '/api/packages/versions/newUploadFinish'));
     } catch (err) {
-      return shelf.Response.found(_resolveUrl(req, '/api/packages/versions/newUploadFinish?error=$err'));
+      return shelf.Response.found(_resolveUrl(
+          req, '/api/packages/versions/newUploadFinish?error=$err'));
     }
   }
 
@@ -568,7 +569,7 @@ class App {
         var color = latest.major == 0 ? 'orange' : 'blue';
 
         return shelf.Response.found(
-            _getBadgeUrl('unpub', latest.toString(), color, queryParameters));
+            _getBadgeUrl('in_pub', latest.toString(), color, queryParameters));
       case 'd':
         return shelf.Response.found(_getBadgeUrl(
             'downloads', package.download.toString(), 'blue', queryParameters));

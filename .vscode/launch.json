@@ -5,12 +5,12 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "unpub",
-            "cwd": "unpub",
+            "name": "in_pub",
+            "cwd": "in_pub",
             "request": "launch",
             "type": "dart",
             "args": ["--database", "mongodb://localhost:27017/dart_pub"],
-            "program": "bin/unpub.dart",
+            "program": "bin/in_pub.dart",
         },
         {
             "name": "unpub_aws",

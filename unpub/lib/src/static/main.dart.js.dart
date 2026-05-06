@@ -1,4 +1,5 @@
-const content = """(function dartProgram(){function copyProperties(a,b){var s=Object.keys(a)
+const content =
+    """(function dartProgram(){function copyProperties(a,b){var s=Object.keys(a)
 for(var r=0;r<s.length;r++){var q=s[r]
 b[q]=a[q]}}function mixinProperties(a,b){var s=Object.keys(a)
 for(var r=0;r<s.length;r++){var q=s[r]
@@ -14260,13 +14261,13 @@ r.t(p,"site-footer")
 r.B(p)
 s=o.a(T.x(q,p,"a"))
 r.t(s,"link")
-T.an(s,"href","https://github.com/bytedance/unpub")
+T.an(s,"href","https://github.com/Innim/in_pub")
 r.H(s)
 T.X(s,"Source code")
 T.X(p," ")
 o=o.a(T.x(q,p,"a"))
 r.t(o,"link github_issue")
-T.an(o,"href","https://github.com/bytedance/unpub/issues/new")
+T.an(o,"href","https://github.com/Innim/in_pub/issues/new")
 r.H(o)
 T.X(o,"Report an issue")
 r.a5(p)}}
