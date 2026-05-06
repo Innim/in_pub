@@ -1,3 +1,7 @@
+## 3.1.0 
+
+- Add endpoint to remove a package version.
+
 ## 3.0.0
 
 Released as `in_pub`.
