@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:path/path.dart' as path;
 import 'package:args/args.dart';
 import 'package:mongo_dart/mongo_dart.dart';
+import 'package:yaml/yaml.dart';
 import 'package:in_pub/in_pub.dart' as in_pub;
 
 main(List<String> args) async {
@@ -25,6 +26,16 @@ main(List<String> args) async {
     exit(1);
   }
 
+  String version = '';
+  try {
+    final scriptDir = File(Platform.script.toFilePath()).parent;
+    final pubspecFile = File(path.join(scriptDir.parent.path, 'pubspec.yaml'));
+    if (await pubspecFile.exists()) {
+      final yaml = loadYaml(await pubspecFile.readAsString()) as YamlMap;
+      version = yaml['version']?.toString() ?? '';
+    }
+  } catch (_) {}
+
   final db = Db(dbUri);
   await db.open();
 
@@ -33,6 +44,7 @@ main(List<String> args) async {
   var app = in_pub.App(
       metaStore: in_pub.MongoStore(db),
       packageStore: in_pub.FileStore(baseDir),
+      version: version,
       proxy_origin:
           proxy_origin.trim().isEmpty ? null : Uri.parse(proxy_origin));
 

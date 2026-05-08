@@ -1,10 +1,11 @@
-const content = """<!DOCTYPE html>
+String content(Map<String, String> vars) => """<!DOCTYPE html>
 <html>
   <head>
     <title>in_pub</title>
     <meta charset="utf-8" />
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="app-version" content="${vars['APP_VERSION'] ?? ''}" />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css?family=Roboto:300,400,500,700"
@@ -491,6 +492,10 @@ const content = """<!DOCTYPE html>
         .site-footer > .link {
           display: block;
         }
+        .footer-version {
+          position: static;
+          display: block;
+        }
         #account-nav {
           flex-grow: 1;
         }
@@ -690,6 +695,7 @@ const content = """<!DOCTYPE html>
         font-size: 14px;
         background: #1c2834;
         color: #f8f9fa;
+        position: relative;
       }
       .site-footer a {
         color: #f8f9fa;
@@ -703,6 +709,11 @@ const content = """<!DOCTYPE html>
         max-height: 16px;
         position: relative;
         top: 3px;
+      }
+      .footer-version {
+        position: absolute;
+        right: 16px;
+        font-weight: 400;
       }
       #account-nav {
         color: #000;

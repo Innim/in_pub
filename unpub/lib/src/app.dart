@@ -41,6 +41,8 @@ class App {
   /// A forward proxy uri
   final Uri? proxy_origin;
 
+  final String version;
+
   /// validate if the package can be published
   ///
   /// for more details, see: https://github.com/Innim/in_pub#package-validator
@@ -55,6 +57,7 @@ class App {
     this.overrideUploaderEmail,
     this.uploadValidator,
     this.proxy_origin,
+    this.version = '',
   });
 
   static shelf.Response _okWithJson(Map<String, dynamic> data) =>
@@ -520,15 +523,17 @@ class App {
     });
 
     var pubspec = packageVersion.pubspec;
-    List<String?> authors;
+    List<String> authors;
     if (pubspec['author'] != null) {
       authors = RegExp(r'<(.*?)>')
           .allMatches(pubspec['author'])
           .map((match) => match.group(1))
+          .nonNulls
           .toList();
     } else if (pubspec['authors'] != null) {
       authors = (pubspec['authors'] as List)
           .map((author) => RegExp(r'<(.*?)>').firstMatch(author)!.group(1))
+          .nonNulls
           .toList();
     } else {
       authors = [];
@@ -559,13 +564,13 @@ class App {
   @Route.get('/packages/<name>')
   @Route.get('/packages/<name>/versions/<version>')
   Future<shelf.Response> indexHtml(shelf.Request req) async {
-    return shelf.Response.ok(index_html.content,
+    return shelf.Response.ok(index_html.content({'APP_VERSION': version}),
         headers: {HttpHeaders.contentTypeHeader: ContentType.html.mimeType});
   }
 
   @Route.get('/main.dart.js')
   Future<shelf.Response> mainDartJs(shelf.Request req) async {
-    return shelf.Response.ok(main_dart_js.content,
+    return shelf.Response.ok(main_dart_js.content({}),
         headers: {HttpHeaders.contentTypeHeader: 'text/javascript'});
   }
 

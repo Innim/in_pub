@@ -1,7 +1,7 @@
 import 'dart:html' as html;
-import 'package:angular/angular.dart';
-import 'package:angular_router/angular_router.dart';
-import 'package:angular_forms/angular_forms.dart';
+import 'package:ngdart/angular.dart';
+import 'package:ngrouter/angular_router.dart';
+import 'package:ngforms/angular_forms.dart';
 import 'package:unpub_web/src/routes.dart';
 import 'app_service.dart';
 
@@ -29,4 +29,10 @@ class AppComponent {
 
   String get homeUrl => RoutePaths.home.toUrl();
   bool get loading => appService.loading;
+
+  String get version =>
+      html.document
+          .querySelector('meta[name="app-version"]')
+          ?.getAttribute('content') ??
+      '';
 }

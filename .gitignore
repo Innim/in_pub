@@ -10,3 +10,6 @@
 
 # FVM Version Cache
 .fvm/
+
+# Claude 
+.claude/settings.local.json
