@@ -1,3 +1,8 @@
+## 3.2.0
+
+- Server version is now displayed in the web UI footer.
+- Bundled logo is served at `/logo`; no external image dependency.
+
 ## 3.1.0 
 
 - Add endpoint to remove a package version.
