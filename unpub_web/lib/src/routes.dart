@@ -1,4 +1,4 @@
-import 'package:angular_router/angular_router.dart';
+import 'package:ngrouter/angular_router.dart';
 
 import 'home_component.template.dart' as home_template;
 import 'list_component.template.dart' as list_template;

@@ -61,7 +61,7 @@ WebapiDetailView _$WebapiDetailViewFromJson(Map<String, dynamic> json) =>
       (json['versions'] as List<dynamic>)
           .map((e) => DetailViewVersion.fromJson(e as Map<String, dynamic>))
           .toList(),
-      (json['authors'] as List<dynamic>).map((e) => e as String?).toList(),
+      (json['authors'] as List<dynamic>).map((e) => e as String).toList(),
       (json['dependencies'] as List<dynamic>?)
           ?.map((e) => e as String)
           .toList(),

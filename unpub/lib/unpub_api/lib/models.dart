@@ -53,7 +53,7 @@ class WebapiDetailView {
   final String? readme;
   final String? changelog;
   List<DetailViewVersion> versions;
-  List<String?> authors;
+  List<String> authors;
   List<String>? dependencies;
   List<String> tags;
 

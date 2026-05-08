@@ -1,4 +1,4 @@
-<main *ngIf="data != null">
+<main *ngIf="dataLoaded">
   <p class="package-count"><span>{{ data.count }}</span> results</p>
 
   <ul class="package-list">
@@ -10,7 +10,7 @@
       <p class="metadata">
         v <a [routerLink]="getDetailUrl(package)">{{ package.latest }}</a>
 
-        • Updated: <span>{{ package.updatedAt | date: "mediumDate" }}</span>
+        • Updated: <span>{{ formatDate(package.updatedAt) }}</span>
         <span class="package-tag" *ngFor="let tag of package.tags"
           >{{ tag }}</span
         >
