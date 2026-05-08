@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'package:collection/collection.dart' show IterableExtension;
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -577,9 +576,7 @@ class App {
 
   @Route.get('/logo')
   Future<shelf.Response> logo(shelf.Request req) async {
-    final uri = await Isolate.resolvePackageUri(
-      Uri.parse('package:in_pub/src/static/logo.png'),
-    );
+    final uri = await resolveInPubPackageUri('src/static/logo.png');
     if (uri == null) return shelf.Response.notFound('Not found');
     final file = File(uri.toFilePath());
     if (!await file.exists()) return shelf.Response.notFound('Not found');

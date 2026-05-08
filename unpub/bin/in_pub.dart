@@ -4,6 +4,7 @@ import 'package:args/args.dart';
 import 'package:mongo_dart/mongo_dart.dart';
 import 'package:yaml/yaml.dart';
 import 'package:in_pub/in_pub.dart' as in_pub;
+import 'package:in_pub/src/utils.dart';
 
 main(List<String> args) async {
   var parser = ArgParser();
@@ -28,13 +29,23 @@ main(List<String> args) async {
 
   String version = '';
   try {
-    final scriptDir = File(Platform.script.toFilePath()).parent;
-    final pubspecFile = File(path.join(scriptDir.parent.path, 'pubspec.yaml'));
-    if (await pubspecFile.exists()) {
-      final yaml = loadYaml(await pubspecFile.readAsString()) as YamlMap;
-      version = yaml['version']?.toString() ?? '';
+    print('Reading package version...');
+    final libUri = await resolveInPubPackageUri('');
+    if (libUri == null) {
+      print('Warning: could not resolve package URI, version will be empty.');
+    } else {
+      final pubspecFile = File(libUri.resolve('../pubspec.yaml').toFilePath());
+      if (!await pubspecFile.exists()) {
+        print('Warning: pubspec.yaml not found at ${pubspecFile.path}');
+      } else {
+        final yaml = loadYaml(await pubspecFile.readAsString()) as YamlMap;
+        version = yaml['version']?.toString() ?? '';
+        print('Version: $version');
+      }
     }
-  } catch (_) {}
+  } catch (e) {
+    print('Warning: failed to read version: $e');
+  }
 
   final db = Db(dbUri);
   await db.open();

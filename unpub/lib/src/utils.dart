@@ -1,4 +1,8 @@
+import 'dart:isolate';
 import 'package:yaml/yaml.dart';
+
+Future<Uri?> resolveInPubPackageUri(String path) =>
+    Isolate.resolvePackageUri(Uri.parse('package:in_pub/$path'));
 
 convertYaml(dynamic value) {
   if (value is YamlMap) {
