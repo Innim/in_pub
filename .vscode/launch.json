@@ -13,12 +13,6 @@
             "program": "bin/in_pub.dart",
         },
         {
-            "name": "unpub_aws",
-            "cwd": "unpub_aws",
-            "request": "launch",
-            "type": "dart"
-        },
-        {
             "name": "unpub_web",
             "cwd": "unpub_web",
             "request": "launch",
