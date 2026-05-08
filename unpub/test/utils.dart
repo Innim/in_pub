@@ -4,7 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:in_pub/in_pub.dart' as in_pub;
 import 'package:mongo_dart/mongo_dart.dart';
 
-final notExistingPacakge = 'not_existing_package';
+final notExistingPackage = 'not_existing_package';
 final baseDir = path.absolute('unpub-packages');
 final pubHostedUrl = 'http://localhost:4000';
 final baseUri = Uri.parse(pubHostedUrl);

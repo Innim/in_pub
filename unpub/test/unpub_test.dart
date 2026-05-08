@@ -197,7 +197,7 @@ main() {
     });
 
     test('not existing', () async {
-      var res = await getVersions(notExistingPacakge);
+      var res = await getVersions(notExistingPackage);
       expect(res.statusCode, HttpStatus.notFound);
     });
   });
@@ -262,7 +262,7 @@ main() {
     });
 
     test('not existing', () async {
-      var res = await getSpecificVersion(notExistingPacakge, '0.0.1');
+      var res = await getSpecificVersion(notExistingPackage, '0.0.1');
       expect(res.statusCode, HttpStatus.notFound);
     });
   });
@@ -382,7 +382,7 @@ main() {
 
       test('package not exists', () async {
         var res =
-            await http.get(baseUri.resolve('/badge/v/$notExistingPacakge'));
+            await http.get(baseUri.resolve('/badge/v/$notExistingPackage'));
         expect(res.statusCode, HttpStatus.notFound);
       });
     });
@@ -399,7 +399,7 @@ main() {
 
       test('package not exists', () async {
         var res =
-            await http.get(baseUri.resolve('/badge/d/$notExistingPacakge'));
+            await http.get(baseUri.resolve('/badge/d/$notExistingPackage'));
         expect(res.statusCode, HttpStatus.notFound);
       });
     });

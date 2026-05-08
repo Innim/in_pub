@@ -1,3 +1,19 @@
 {
-  "dart.flutterSdkPath": ".fvm/versions/3.41.4"
+  "dart.flutterSdkPath": ".fvm/versions/3.41.4",
+  "cSpell.ignorePaths": [
+    "unpub/lib/src/static/index.html.dart",
+    "unpub/lib/src/static/main.dart.js.dart",
+  ],
+  "cSpell.words": [
+    "INITDB",
+    "ngdart",
+    "ngforms",
+    "ngrouter",
+    "NNBD",
+    "tokeninfo",
+    "unpub",
+    "uploaders",
+    "webapi",
+    "webdev"
+  ],
 }
