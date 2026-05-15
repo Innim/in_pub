@@ -1,4 +1,4 @@
-## 3.2.1 - 2026-05-15
+## 3.2.1
 
 ### Fixed
 - Auth failures now return `401 Unauthorized` (with `WWW-Authenticate: Bearer`) instead of `400 Bad Request`.
