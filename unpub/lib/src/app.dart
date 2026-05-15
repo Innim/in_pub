@@ -17,6 +17,7 @@ import 'package:in_pub/unpub_api/lib/models.dart';
 import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
 import 'utils.dart';
+import 'auth_exception.dart';
 import 'static/index.html.dart' as index_html;
 import 'static/main.dart.js.dart' as main_dart_js;
 
@@ -83,6 +84,17 @@ class App {
         }),
       );
 
+  static shelf.Response _unauthorized(String message) => shelf.Response(
+        HttpStatus.unauthorized,
+        headers: {
+          HttpHeaders.contentTypeHeader: ContentType.json.mimeType,
+          HttpHeaders.wwwAuthenticateHeader: 'Bearer',
+        },
+        body: json.encode({
+          'error': {'message': message}
+        }),
+      );
+
   http.Client? _googleapisClient;
 
   String _resolveUrl(shelf.Request req, String reference) {
@@ -100,7 +112,7 @@ class App {
     if (overrideUploaderEmail != null) return overrideUploaderEmail!;
 
     var authHeader = req.headers[HttpHeaders.authorizationHeader];
-    if (authHeader == null) throw 'missing authorization header';
+    if (authHeader == null) throw AuthException('missing authorization header');
 
     var token = authHeader.split(' ').last;
 
@@ -116,7 +128,7 @@ class App {
 
     var info =
         await Oauth2Api(_googleapisClient!).tokeninfo(accessToken: token);
-    if (info.email == null) throw 'fail to get google account email';
+    if (info.email == null) throw AuthException('fail to get google account email');
     return info.email!;
   }
 
@@ -346,6 +358,8 @@ class App {
       // TODO: Upload docs
       return shelf.Response.found(
           _resolveUrl(req, '/api/packages/versions/newUploadFinish'));
+    } on AuthException catch (e) {
+      return _unauthorized(e.message);
     } catch (err) {
       return shelf.Response.found(_resolveUrl(
           req, '/api/packages/versions/newUploadFinish?error=$err'));
@@ -365,7 +379,12 @@ class App {
   Future<shelf.Response> addUploader(shelf.Request req, String name) async {
     var body = await req.readAsString();
     var email = Uri.splitQueryString(body)['email']!; // TODO: null
-    var operatorEmail = await _getUploaderEmail(req);
+    final String operatorEmail;
+    try {
+      operatorEmail = await _getUploaderEmail(req);
+    } on AuthException catch (e) {
+      return _unauthorized(e.message);
+    }
     var package = await metaStore.queryPackage(name);
 
     if (package?.uploaders?.contains(operatorEmail) == false) {
@@ -383,7 +402,12 @@ class App {
   Future<shelf.Response> removeUploader(
       shelf.Request req, String name, String email) async {
     email = Uri.decodeComponent(email);
-    var operatorEmail = await _getUploaderEmail(req);
+    final String operatorEmail;
+    try {
+      operatorEmail = await _getUploaderEmail(req);
+    } on AuthException catch (e) {
+      return _unauthorized(e.message);
+    }
     var package = await metaStore.queryPackage(name);
 
     // TODO: null
@@ -407,7 +431,12 @@ class App {
       print(err);
     }
 
-    var operatorEmail = await _getUploaderEmail(req);
+    final String operatorEmail;
+    try {
+      operatorEmail = await _getUploaderEmail(req);
+    } on AuthException catch (e) {
+      return _unauthorized(e.message);
+    }
     var package = await metaStore.queryPackage(name);
 
     if (package == null) {

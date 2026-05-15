@@ -1,6 +1,6 @@
 name: in_pub
 description: Self-hosted private Dart Pub server for Enterprise, with a simple web interface to search and view packages information.
-version: 3.2.0
+version: 3.2.1
 homepage: https://github.com/Innim/in_pub
 environment:
   sdk: ">=3.0.0 <4.0.0"
