@@ -6,7 +6,7 @@
     "configurations": [
         {
             "name": "in_pub",
-            "cwd": "in_pub",
+            "cwd": "unpub",
             "request": "launch",
             "type": "dart",
             "args": ["--database", "mongodb://localhost:27017/dart_pub"],
