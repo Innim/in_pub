@@ -48,7 +48,7 @@ main() {
   group('publish', () {
     setUpAll(() async {
       await _cleanUpDb();
-      _server = await createServer(email0);
+      _server = await createServer(email0, _db);
     });
 
     tearDownAll(() async {
@@ -142,7 +142,7 @@ main() {
   group('get versions', () {
     setUpAll(() async {
       await _cleanUpDb();
-      _server = await createServer(email0);
+      _server = await createServer(email0, _db);
       await pubPublish(package0, '0.0.1');
       await pubPublish(package0, '0.0.2');
     });
@@ -205,7 +205,7 @@ main() {
   group('get specific version', () {
     setUpAll(() async {
       await _cleanUpDb();
-      _server = await createServer(email0);
+      _server = await createServer(email0, _db);
       await pubPublish(package0, '0.0.1');
       await pubPublish(package0, '0.0.3+1');
     });
@@ -270,7 +270,7 @@ main() {
   group('uploader', () {
     setUpAll(() async {
       await _cleanUpDb();
-      _server = await createServer(email0);
+      _server = await createServer(email0, _db);
       await pubPublish(package0, '0.0.1');
     });
 
@@ -333,7 +333,7 @@ main() {
     group('permission', () {
       setUpAll(() async {
         await _server.close();
-        _server = await createServer(email1);
+        _server = await createServer(email1, _db);
       });
 
       tearDownAll(() async {
@@ -359,7 +359,7 @@ main() {
   group('badge', () {
     setUpAll(() async {
       await _cleanUpDb();
-      _server = await createServer(email0);
+      _server = await createServer(email0, _db);
       await pubPublish(package0, '0.0.1');
     });
 
