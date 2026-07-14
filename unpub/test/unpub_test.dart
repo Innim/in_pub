@@ -37,8 +37,12 @@ main() {
   }
 
   _cleanUpDb() async {
-    await _db.dropCollection(packageCollection);
-    await _db.dropCollection(statsCollection);
+    // Delete all documents rather than dropCollection: in mongo_dart 0.7.4
+    // dropCollection silently no-ops unless getCollectionInfos returns exactly
+    // one match, which does not hold on all mongo builds (e.g. CI), leaving
+    // state to leak between groups. deleteMany has no such guard.
+    await _db.collection(packageCollection).deleteMany(<String, dynamic>{});
+    await _db.collection(statsCollection).deleteMany(<String, dynamic>{});
   }
 
   tearDownAll(() async {

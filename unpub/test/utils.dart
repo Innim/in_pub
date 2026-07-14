@@ -16,10 +16,8 @@ final email1 = 'email1@example.com';
 final email2 = 'email2@example.com';
 final email3 = 'email3@example.com';
 
-// Reuse the test's already-open [db] connection rather than opening a second
-// one. With two separate connections, a collection drop performed on the test
-// connection is not reliably visible to the server connection (observed as
-// leaked state between groups on CI), and each call also leaked a connection.
+// Reuse the test's already-open [db] connection rather than opening (and
+// leaking) a separate one on every call.
 createServer(String opEmail, Db db) async {
   var mongoStore = in_pub.MongoStore(db);
 
