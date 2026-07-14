@@ -1,0 +1,50 @@
+name: Analyze and Test
+
+on: push
+
+# Pinned to the Dart SDK bundled with the project's Flutter (see .fvmrc,
+# Flutter 3.41.4 -> Dart 3.11.1) so `dart format` output matches local `fvm dart`.
+env:
+  DART_SDK_VERSION: "3.11.1"
+
+# Only the `in_pub` server package is linted and tested here. The web UI
+# (unpub_web) is built separately and its output is committed as Dart sources.
+# Publishing lives in publish.yml, gated on this workflow succeeding on master.
+defaults:
+  run:
+    working-directory: unpub
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ env.DART_SDK_VERSION }}
+      - run: dart pub get
+      - name: Analyze
+        run: dart analyze
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ env.DART_SDK_VERSION }}
+      - run: dart pub get
+      - name: Run tests
+        run: dart test
