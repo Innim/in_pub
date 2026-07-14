@@ -157,6 +157,19 @@ class App {
     };
   }
 
+  /// Picks the version to show by default for a package: the highest stable
+  /// version, or the highest prerelease (dev/alpha/beta) only when there is no
+  /// stable version at all. This is not necessarily the last uploaded version —
+  /// a fix published for an older release must not become the default.
+  UnpubVersion? _primaryVersion(List<UnpubVersion> versions) {
+    if (versions.isEmpty) return null;
+    var primary = semver.Version.primary(
+        versions.map((v) => semver.Version.parse(v.version)).toList());
+    return versions.firstWhere(
+        (v) => semver.Version.parse(v.version) == primary,
+        orElse: () => versions.last);
+  }
+
   bool isPubClient(shelf.Request req) {
     var ua = req.headers[HttpHeaders.userAgentHeader];
     print(ua);
@@ -182,9 +195,12 @@ class App {
     var versionMaps =
         package.versions.map((item) => _versionToJson(item, req)).toList();
 
+    var primary = _primaryVersion(package.versions);
+
     return _okWithJson({
       'name': name,
-      'latest': versionMaps.last, // TODO: Exclude pre release
+      'latest':
+          primary != null ? _versionToJson(primary, req) : versionMaps.last,
       'versions': versionMaps,
     });
   }
@@ -492,13 +508,14 @@ class App {
 
     var data = ListApi(result.count, [
       for (var package in result.packages)
-        ListApiPackage(
-          package.name,
-          package.versions.last.pubspec['description'] as String?,
-          getPackageTags(package.versions.last.pubspec),
-          package.versions.last.version,
-          package.updatedAt,
-        )
+        if (_primaryVersion(package.versions) case var primary?)
+          ListApiPackage(
+            package.name,
+            primary.pubspec['description'] as String?,
+            getPackageTags(primary.pubspec),
+            primary.version,
+            package.updatedAt,
+          )
     ]);
 
     return _okWithJson({'data': data.toJson()});
@@ -534,7 +551,7 @@ class App {
 
     UnpubVersion? packageVersion;
     if (version == 'latest') {
-      packageVersion = package.versions.last;
+      packageVersion = _primaryVersion(package.versions);
     } else {
       packageVersion =
           package.versions.firstWhereOrNull((item) => item.version == version);
