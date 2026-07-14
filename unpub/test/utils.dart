@@ -48,10 +48,20 @@ Future<ProcessResult> pubPublish(String name, String version) {
       environment: {'PUB_HOSTED_URL': pubHostedUrl});
 }
 
-Future<ProcessResult> pubUploader(String name, String operation, String email) {
-  assert(['add', 'remove'].contains(operation), 'operation error');
+// `dart pub uploader` was removed from the SDK, so exercise the server's
+// uploader API (`POST/DELETE /api/packages/<name>/uploaders`) directly.
+Future<http.Response> addUploader(String name, String email) {
+  name = Uri.encodeComponent(name);
+  return http.post(
+    baseUri.resolve('/api/packages/$name/uploaders'),
+    body: {'email': email},
+  );
+}
 
-  return Process.run('dart', ['pub', 'uploader', operation, email],
-      workingDirectory: path.absolute('test/fixtures', name, '0.0.1'),
-      environment: {'PUB_HOSTED_URL': pubHostedUrl});
+Future<http.Response> removeUploader(String name, String email) {
+  name = Uri.encodeComponent(name);
+  email = Uri.encodeComponent(email);
+  return http.delete(
+    baseUri.resolve('/api/packages/$name/uploaders/$email'),
+  );
 }

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:collection/collection.dart' show IterableExtension;
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -128,7 +129,8 @@ class App {
 
     var info =
         await Oauth2Api(_googleapisClient!).tokeninfo(accessToken: token);
-    if (info.email == null) throw AuthException('fail to get google account email');
+    if (info.email == null)
+      throw AuthException('fail to get google account email');
     return info.email!;
   }
 

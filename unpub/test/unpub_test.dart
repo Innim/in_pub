@@ -111,7 +111,7 @@ main() {
 
     test('no readme and changelog', () async {
       var version = '1.0.0-noreadme';
-      var result = await pubPublish(package0, version);
+      await pubPublish(package0, version);
       // expect(result.stderr, ''); // Suggestions:
 
       var meta = await _readMeta(package0);
@@ -280,22 +280,24 @@ main() {
 
     group('add', () {
       test('already exists', () async {
-        var result = await pubUploader(package0, 'add', email0);
-        expect(result.stderr, contains('email already exists'));
+        var res = await addUploader(package0, email0);
+        expect(res.statusCode, HttpStatus.badRequest);
+        expect(json.decode(res.body)['error']['message'],
+            contains('email already exists'));
 
         var meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0]));
       });
 
       test('success', () async {
-        var result = await pubUploader(package0, 'add', email1);
-        expect(result.stderr, '');
+        var res = await addUploader(package0, email1);
+        expect(res.statusCode, HttpStatus.ok);
 
         var meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0, email1]));
 
-        result = await pubUploader(package0, 'add', email2);
-        expect(result.stderr, '');
+        res = await addUploader(package0, email2);
+        expect(res.statusCode, HttpStatus.ok);
 
         meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0, email1, email2]));
@@ -304,22 +306,24 @@ main() {
 
     group('remove', () {
       test('not in uploader', () async {
-        var result = await pubUploader(package0, 'remove', email3);
-        expect(result.stderr, contains('email not uploader'));
+        var res = await removeUploader(package0, email3);
+        expect(res.statusCode, HttpStatus.badRequest);
+        expect(json.decode(res.body)['error']['message'],
+            contains('email not uploader'));
 
         var meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0, email1, email2]));
       });
 
       test('success', () async {
-        var result = await pubUploader(package0, 'remove', email2);
-        expect(result.stderr, '');
+        var res = await removeUploader(package0, email2);
+        expect(res.statusCode, HttpStatus.ok);
 
         var meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0, email1]));
 
-        result = await pubUploader(package0, 'remove', email1);
-        expect(result.stderr, '');
+        res = await removeUploader(package0, email1);
+        expect(res.statusCode, HttpStatus.ok);
 
         meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0]));
@@ -337,13 +341,17 @@ main() {
       });
 
       test('add', () async {
-        var result = await pubUploader(package0, 'add', email0);
-        expect(result.stderr, contains('no permission'));
+        var res = await addUploader(package0, email0);
+        expect(res.statusCode, HttpStatus.forbidden);
+        expect(json.decode(res.body)['error']['message'],
+            contains('no permission'));
       });
 
       test('remove', () async {
-        var result = await pubUploader(package0, 'remove', email0);
-        expect(result.stderr, contains('no permission'));
+        var res = await removeUploader(package0, email0);
+        expect(res.statusCode, HttpStatus.forbidden);
+        expect(json.decode(res.body)['error']['message'],
+            contains('no permission'));
       });
     });
   });

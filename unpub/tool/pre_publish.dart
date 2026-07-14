@@ -15,8 +15,7 @@ main(List<String> args) {
       RegExp(r'\{\{\\\$([A-Z][A-Z0-9_]*)\}\}'),
       (m) => "\${vars['${m.group(1)}'] ?? ''}",
     );
-    File(path.absolute('unpub/lib/src/static', '$file.dart'))
-        .writeAsStringSync(
+    File(path.absolute('unpub/lib/src/static', '$file.dart')).writeAsStringSync(
       'String content(Map<String, String> vars) => """$content""";\n',
     );
   }
