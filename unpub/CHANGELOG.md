@@ -1,4 +1,6 @@
 
+## 3.2.2
+
 ### Fixed
 - Version links on a package's Versions tab now open the selected version instead of doing nothing.
 - The default displayed version is now the highest stable version instead of the last uploaded one. A fix published for an older release no longer becomes the default, and prerelease versions (dev/alpha/beta) are only shown by default when there is no stable version.
