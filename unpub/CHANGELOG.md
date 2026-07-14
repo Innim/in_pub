@@ -1,3 +1,7 @@
+
+### Fixed
+- Version links on a package's Versions tab now open the selected version instead of doing nothing.
+
 ## 3.2.1
 
 ### Fixed

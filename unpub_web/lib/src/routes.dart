@@ -34,6 +34,7 @@ class Routes {
   static final all = <RouteDefinition>[
     home,
     list,
+    detailVersion,
     detail,
     // RouteDefinition.redirect(
     //   path: '',
