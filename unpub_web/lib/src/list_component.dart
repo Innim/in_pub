@@ -28,7 +28,7 @@ class ListComponent implements OnInit, OnActivate {
   List<int> get pages {
     if (!dataLoaded) return [];
     var leftCount = min(currentPage, 5);
-    var rightCount = min(pageCount - currentPage, 5);
+    var rightCount = min(pageCount - 1 - currentPage, 5);
     var offset = max(currentPage - 5, 0);
     return List.generate(leftCount + rightCount + 1, (i) => i + offset);
   }
