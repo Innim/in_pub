@@ -18,7 +18,9 @@ final _myUriPolify = _MyUriPolicy();
 
 final NodeValidatorBuilder _htmlValidator = NodeValidatorBuilder.common()
   ..allowElement('a', attributes: ['href'], uriPolicy: _myUriPolify)
-  ..allowElement('img', uriAttributes: ['src'], uriPolicy: _myUriPolify);
+  ..allowElement('img', uriAttributes: ['src'], uriPolicy: _myUriPolify)
+  // Allow inline styles so Markdown table column alignment (text-align) works.
+  ..allowInlineStyles();
 
 @Component(
   selector: 'detail',
@@ -38,11 +40,14 @@ class DetailComponent implements OnInit, OnActivate {
   int activeTab = 0;
   bool packageNotExists = false;
 
-  String? get readmeHtml =>
-      package.readme == null ? null : markdownToHtml(package.readme!);
+  String? get readmeHtml => package.readme == null
+      ? null
+      : markdownToHtml(package.readme!, extensionSet: ExtensionSet.gitHubWeb);
 
-  String? get changelogHtml =>
-      package.changelog == null ? null : markdownToHtml(package.changelog!);
+  String? get changelogHtml => package.changelog == null
+      ? null
+      : markdownToHtml(package.changelog!,
+          extensionSet: ExtensionSet.gitHubWeb);
 
   String get pubDevLink {
     var url = 'https://pub.dev/packages/$packageName';

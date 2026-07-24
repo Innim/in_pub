@@ -1,4 +1,9 @@
 
+## Unreleased
+
+### Fixed
+- Markdown tables (and other GitHub-flavored elements like fenced code and strikethrough) now render correctly on package pages; table column alignment is preserved.
+
 ## 3.2.2
 
 ### Fixed
