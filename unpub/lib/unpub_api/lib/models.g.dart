@@ -7,7 +7,7 @@ part of 'models.dart';
 // **************************************************************************
 
 ListApi _$ListApiFromJson(Map<String, dynamic> json) => ListApi(
-      json['count'] as int,
+      (json['count'] as num).toInt(),
       (json['packages'] as List<dynamic>)
           .map((e) => ListApiPackage.fromJson(e as Map<String, dynamic>))
           .toList(),
@@ -48,6 +48,20 @@ Map<String, dynamic> _$DetailViewVersionToJson(DetailViewVersion instance) =>
       'createdAt': instance.createdAt.toIso8601String(),
     };
 
+DependencyView _$DependencyViewFromJson(Map<String, dynamic> json) =>
+    DependencyView(
+      json['name'] as String,
+      url: json['url'] as String?,
+      internal: json['internal'] as bool? ?? false,
+    );
+
+Map<String, dynamic> _$DependencyViewToJson(DependencyView instance) =>
+    <String, dynamic>{
+      'name': instance.name,
+      'url': instance.url,
+      'internal': instance.internal,
+    };
+
 WebapiDetailView _$WebapiDetailViewFromJson(Map<String, dynamic> json) =>
     WebapiDetailView(
       json['name'] as String,
@@ -63,7 +77,7 @@ WebapiDetailView _$WebapiDetailViewFromJson(Map<String, dynamic> json) =>
           .toList(),
       (json['authors'] as List<dynamic>).map((e) => e as String).toList(),
       (json['dependencies'] as List<dynamic>?)
-          ?.map((e) => e as String)
+          ?.map((e) => DependencyView.fromJson(e as Map<String, dynamic>))
           .toList(),
       (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
     );

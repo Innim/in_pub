@@ -587,7 +587,18 @@ class App {
       authors = [];
     }
 
-    var depMap = (pubspec['dependencies'] as Map? ?? {}).cast<String, String>();
+    var depMap =
+        (pubspec['dependencies'] as Map? ?? {}).cast<String, dynamic>();
+    var selfUri = Uri.parse(_resolveUrl(req, '/'));
+    var dependencies = <DependencyView>[];
+    for (var entry in depMap.entries) {
+      dependencies.add(await resolveDependencyView(
+        entry.key,
+        entry.value,
+        selfUri,
+        (name) async => (await metaStore.queryPackage(name)) != null,
+      ));
+    }
 
     var data = WebapiDetailView(
       package.name,
@@ -600,11 +611,91 @@ class App {
       packageVersion.changelog,
       versions,
       authors,
-      depMap.keys.toList(),
+      dependencies,
       getPackageTags(packageVersion.pubspec),
     );
 
     return _okWithJson({'data': data.toJson()});
+  }
+
+  static bool _isPubDevHost(String host) =>
+      host == 'pub.dev' || host == 'pub.dartlang.org';
+
+  /// A normalized origin+path key used to decide whether a hosted dependency
+  /// points at *this* server. Comparing only the host is not enough: the same
+  /// hostname can serve different pub repositories on different ports or path
+  /// prefixes (e.g. `http://localhost:8080` vs `http://localhost:4000`).
+  static String _baseKey(Uri uri) {
+    var path = uri.path;
+    if (path.endsWith('/')) path = path.substring(0, path.length - 1);
+    return '${uri.scheme}://${uri.host}:${uri.port}$path';
+  }
+
+  /// Builds a [DependencyView] for a single pubspec dependency entry,
+  /// resolving where the package is actually hosted so the web UI can link
+  /// to the right place (this server, pub.dev, or another hosted server).
+  ///
+  /// [spec] is the raw pubspec dependency value: a version string, or a map
+  /// describing a `hosted`/`sdk`/`git`/`path` source.
+  static Future<DependencyView> resolveDependencyView(
+    String name,
+    dynamic spec,
+    Uri selfUri,
+    Future<bool> Function(String name) isPublishedLocally,
+  ) async {
+    if (spec is Map) {
+      // sdk dependencies: Flutter SDK packages link to the Flutter API docs
+      // (matching pub.dev); other sdk sources have no pub page to link to.
+      var sdk = spec['sdk'];
+      if (sdk != null) {
+        if (sdk == 'flutter') {
+          return DependencyView(name, url: 'https://api.flutter.dev/');
+        }
+        return DependencyView(name);
+      }
+
+      // git/path dependencies have no pub page to link to.
+      if (spec.containsKey('git') || spec.containsKey('path')) {
+        return DependencyView(name);
+      }
+
+      var hosted = spec['hosted'];
+      if (hosted != null) {
+        // `hosted` may be a plain url string or a {name, url} map.
+        String? url;
+        var hostedName = name;
+        if (hosted is String) {
+          url = hosted;
+        } else if (hosted is Map) {
+          url = hosted['url'] as String?;
+          hostedName = (hosted['name'] as String?) ?? name;
+        }
+
+        if (url != null) {
+          var depUri = Uri.tryParse(url);
+          var host = depUri?.host;
+          if (depUri == null ||
+              host == null ||
+              host.isEmpty ||
+              _baseKey(depUri) == _baseKey(selfUri)) {
+            return DependencyView(name, internal: true);
+          }
+          if (_isPubDevHost(host)) {
+            return DependencyView(name,
+                url: 'https://pub.dev/packages/$hostedName');
+          }
+          var base = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+          return DependencyView(name, url: '$base/packages/$hostedName');
+        }
+      }
+    }
+
+    // Plain version string (default pub server). If this server hosts the
+    // package, link internally; otherwise it comes from pub.dev.
+    if (await isPublishedLocally(name)) {
+      return DependencyView(name, internal: true);
+    }
+    return DependencyView(name, url: 'https://pub.dev/packages/$name');
   }
 
   @Route.get('/')

@@ -149,8 +149,16 @@
       <h3 class="title">Dependencies</h3>
       <p>
         <span *ngFor="let dep of package.dependencies; let isLast = last">
-          <a [routerLink]="getDetailUrl(dep)">{{ dep }}</a>{{ isLast ? "" : ", "
-          }}
+          <a *ngIf="dep.internal" [routerLink]="getDetailUrl(dep.name)"
+            >{{ dep.name }}</a
+          ><a
+            *ngIf="!dep.internal && dep.url != null"
+            [href]="dep.url"
+            target="_blank"
+            rel="noopener"
+            >{{ dep.name }}</a
+          ><span *ngIf="!dep.internal && dep.url == null">{{ dep.name }}</span
+          >{{ isLast ? "" : ", " }}
         </span>
       </p>
 

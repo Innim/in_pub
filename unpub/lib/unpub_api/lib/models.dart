@@ -43,6 +43,30 @@ class DetailViewVersion {
 }
 
 @JsonSerializable()
+class DependencyView {
+  /// Package name.
+  String name;
+
+  /// Absolute URL to the dependency's page on an external pub server
+  /// (e.g. pub.dev or another hosted server).
+  ///
+  /// `null` when [internal] is `true`, or when the dependency is not linkable
+  /// to a pub page (sdk/git/path sources).
+  String? url;
+
+  /// `true` when the dependency is hosted on this server and should be linked
+  /// with an internal router link.
+  bool internal;
+
+  DependencyView(this.name, {this.url, this.internal = false});
+
+  factory DependencyView.fromJson(Map<String, dynamic> map) =>
+      _$DependencyViewFromJson(map);
+
+  Map<String, dynamic> toJson() => _$DependencyViewToJson(this);
+}
+
+@JsonSerializable()
 class WebapiDetailView {
   String name;
   String version;
@@ -54,7 +78,7 @@ class WebapiDetailView {
   final String? changelog;
   List<DetailViewVersion> versions;
   List<String> authors;
-  List<String>? dependencies;
+  List<DependencyView>? dependencies;
   List<String> tags;
 
   WebapiDetailView(
