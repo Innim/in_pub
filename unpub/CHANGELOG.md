@@ -1,5 +1,5 @@
 
-## Unreleased
+## 3.3.0
 
 ### Added
 - The "API reference" link on a package page now works. The server generates dartdoc API documentation on demand at `/documentation/<name>/<version>/` (running `dart pub get` + `dart doc`), caches the result under `unpub-docs/`, and serves it; the first view shows a progress screen that opens the docs automatically once they are ready. Generation requires a Dart SDK on the server host and can be disabled with `--no-docs` (with the SDK executable configurable via `--dart-executable`); when disabled, the "API reference" link is hidden. Docs for a version are removed when that version is deleted, and requests for packages not hosted here are redirected to the upstream server's documentation.
