@@ -81,6 +81,11 @@ class WebapiDetailView {
   List<DependencyView>? dependencies;
   List<String> tags;
 
+  /// Whether this server can serve generated API documentation for this
+  /// package (i.e. a doc store is configured). Controls the "API reference"
+  /// link in the web UI.
+  bool hasDocs;
+
   WebapiDetailView(
       this.name,
       this.version,
@@ -93,7 +98,8 @@ class WebapiDetailView {
       this.versions,
       this.authors,
       this.dependencies,
-      this.tags);
+      this.tags,
+      {this.hasDocs = false});
 
   factory WebapiDetailView.fromJson(Map<String, dynamic> map) =>
       _$WebapiDetailViewFromJson(map);

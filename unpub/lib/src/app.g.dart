@@ -25,6 +25,21 @@ Router _$AppRouter(App service) {
   );
   router.add(
     'GET',
+    r'/documentation/<name>/<version>',
+    service.documentationRedirect,
+  );
+  router.add(
+    'GET',
+    r'/documentation/<name>/<version>/__status',
+    service.documentationStatus,
+  );
+  router.add(
+    'GET',
+    r'/documentation/<name>/<version>/<file|[^]*>',
+    service.documentation,
+  );
+  router.add(
+    'GET',
     r'/api/packages/versions/new',
     service.getUploadUrl,
   );

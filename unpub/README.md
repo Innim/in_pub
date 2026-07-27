@@ -49,9 +49,44 @@ main(List<String> args) async {
 | --- | --- | --- |
 | `metaStore` (Required) | Meta information store | - |
 | `packageStore` (Required) | Package(tarball) store | - |
+| `docStore` | On-demand dartdoc API docs store (see [API documentation](#api-documentation)) | - (disabled) |
 | `upstream` | Upstream url | https://pub.dev |
 | `googleapisProxy` | Http(s) proxy to call googleapis (to get uploader email) | - |
 | `uploadValidator` | See [Package validator](#package-validator) | - |
+
+
+### API documentation
+
+in_pub can generate [dartdoc](https://dart.dev/tools/dart-doc) API documentation
+for hosted packages on demand and serve it at `/documentation/<name>/<version>/`
+(this is the "API reference" link on each package page). The first request for a
+version extracts its tarball, runs `dart pub get` + `dart doc`, caches the result
+under the store directory, and serves it; later requests come straight from the
+cache. While docs are being built for the first time a progress page is shown
+that opens the documentation automatically once it is ready.
+
+Enable it by passing a `docStore`:
+
+```dart
+final app = in_pub.App(
+  metaStore: in_pub.MongoStore(db),
+  packageStore: in_pub.FileStore('./unpub-packages'),
+  docStore: in_pub.DocStore('./unpub-docs'),
+);
+```
+
+Notes:
+
+- A Dart SDK must be available on the server host (to run `dart pub get` and
+  `dart doc`). The executable defaults to `dart` on `PATH`; override it with
+  `in_pub.DocStore('./unpub-docs', dartExecutable: '/path/to/dart')`.
+- Generation resolves the package's dependencies, so the host needs network
+  access and reachability of any private dependencies hosted on this server.
+- If `docStore` is not configured the `/documentation/...` route is disabled and
+  the "API reference" link is hidden in the web UI.
+
+From the command line docs are enabled by default; use `--no-docs` to disable
+them and `--dart-executable` to point at a specific Dart SDK.
 
 
 ### Usage behind reverse-proxy

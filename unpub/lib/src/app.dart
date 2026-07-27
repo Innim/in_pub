@@ -17,6 +17,9 @@ import 'package:in_pub/src/models.dart';
 import 'package:in_pub/unpub_api/lib/models.dart';
 import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
+import 'package:in_pub/src/doc_store.dart';
+import 'package:in_pub/src/doc_progress_page.dart';
+import 'package:path/path.dart' as p;
 import 'utils.dart';
 import 'auth_exception.dart';
 import 'static/index.html.dart' as index_html;
@@ -32,6 +35,10 @@ class App {
 
   /// package(tarball) store
   final PackageStore packageStore;
+
+  /// generates and caches dartdoc API documentation on demand; when null the
+  /// `/documentation/...` route is disabled.
+  final DocStore? docStore;
 
   /// upstream url, default: https://pub.dev
   final String upstream;
@@ -54,6 +61,7 @@ class App {
   App({
     required this.metaStore,
     required this.packageStore,
+    this.docStore,
     this.upstream = 'https://pub.dev',
     this.googleapisProxy,
     this.overrideUploaderEmail,
@@ -256,6 +264,115 @@ class App {
         headers: {HttpHeaders.contentTypeHeader: ContentType.binary.mimeType},
       );
     }
+  }
+
+  Future<List<int>> _readTarball(String name, String version) async {
+    var builder = BytesBuilder();
+    await for (var chunk in packageStore.download(name, version)) {
+      builder.add(chunk);
+    }
+    return builder.takeBytes();
+  }
+
+  /// Requests without a trailing slash are redirected so the generated docs'
+  /// relative asset/links resolve against the version directory.
+  @Route.get('/documentation/<name>/<version>')
+  Future<shelf.Response> documentationRedirect(
+      shelf.Request req, String name, String version) async {
+    return shelf.Response.movedPermanently(
+        req.requestedUri.replace(path: '${req.requestedUri.path}/').toString());
+  }
+
+  /// JSON generation status, polled by the "generating…" progress page.
+  @Route.get('/documentation/<name>/<version>/__status')
+  Future<shelf.Response> documentationStatus(
+      shelf.Request req, String name, String version) async {
+    if (docStore == null) {
+      return _okWithJson({'status': DocStatus.none.name});
+    }
+    try {
+      version = Uri.decodeComponent(version);
+    } catch (_) {}
+
+    var status = docStore!.statusOf(name, version);
+    return _okWithJson({
+      'status': status.name,
+      if (status == DocStatus.failed)
+        'error': docStore!.errorOf(name, version) ??
+            'Documentation generation failed.',
+    });
+  }
+
+  @Route.get('/documentation/<name>/<version>/<file|[^]*>')
+  Future<shelf.Response> documentation(
+      shelf.Request req, String name, String version, String file) async {
+    if (docStore == null) {
+      return shelf.Response.notFound(
+          'API documentation is not available on this server.');
+    }
+
+    try {
+      version = Uri.decodeComponent(version);
+    } catch (_) {}
+
+    // Already generated: serve the requested file straight from the cache,
+    // without a metadata lookup.
+    var docDir = docStore!.cachedDir(name, version);
+    if (docDir != null) {
+      return _serveDocFile(docDir, file.isEmpty ? 'index.html' : file);
+    }
+
+    // A sub-resource requested before docs exist: nothing to serve yet.
+    if (file.isNotEmpty && file != 'index.html') {
+      return shelf.Response.notFound('Not Found');
+    }
+
+    var package = await metaStore.queryPackage(name);
+    // Not hosted here — defer to the upstream server's documentation.
+    if (package == null) {
+      return shelf.Response.found(Uri.parse(upstream)
+          .resolve('/documentation/$name/$version/')
+          .toString());
+    }
+    if (package.versions.every((v) => v.version != version)) {
+      return shelf.Response.notFound('Not Found');
+    }
+
+    // Kick off generation (idempotent) and show the progress page, which
+    // polls `__status` and reloads into the docs when they are ready.
+    docStore!.startGeneration(name, version, () => _readTarball(name, version));
+    return shelf.Response.ok(
+      docProgressPage(name, version),
+      headers: {HttpHeaders.contentTypeHeader: ContentType.html.mimeType},
+    );
+  }
+
+  Future<shelf.Response> _serveDocFile(Directory docDir, String file) async {
+    // Resolve the requested file within the doc dir, guarding against
+    // path traversal (`..`) escaping the cache.
+    var target = p.normalize(p.join(docDir.path, file));
+    if (!p.equals(target, docDir.path) && !p.isWithin(docDir.path, target)) {
+      return shelf.Response.notFound('Not Found');
+    }
+
+    // dartdoc links to libraries as directories (e.g. `foo/`); serve the
+    // directory's index.html so those links resolve.
+    if (await Directory(target).exists()) {
+      target = p.join(target, 'index.html');
+    }
+
+    var f = File(target);
+    if (!await f.exists()) {
+      return shelf.Response.notFound('Not Found');
+    }
+
+    return shelf.Response.ok(
+      f.openRead(),
+      headers: {
+        HttpHeaders.contentTypeHeader:
+            lookupMimeType(target) ?? 'application/octet-stream',
+      },
+    );
   }
 
   @Route.get('/api/packages/versions/new')
@@ -475,6 +592,7 @@ class App {
 
     await metaStore.removeVersion(name, version);
     await packageStore.delete(name, version);
+    await docStore?.delete(name, version);
     return _successMessage('version removed');
   }
 
@@ -613,6 +731,7 @@ class App {
       authors,
       dependencies,
       getPackageTags(packageVersion.pubspec),
+      hasDocs: docStore != null,
     );
 
     return _okWithJson({'data': data.toJson()});

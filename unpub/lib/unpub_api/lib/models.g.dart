@@ -80,6 +80,7 @@ WebapiDetailView _$WebapiDetailViewFromJson(Map<String, dynamic> json) =>
           ?.map((e) => DependencyView.fromJson(e as Map<String, dynamic>))
           .toList(),
       (json['tags'] as List<dynamic>).map((e) => e as String).toList(),
+      hasDocs: json['hasDocs'] as bool? ?? false,
     );
 
 Map<String, dynamic> _$WebapiDetailViewToJson(WebapiDetailView instance) =>
@@ -96,4 +97,5 @@ Map<String, dynamic> _$WebapiDetailViewToJson(WebapiDetailView instance) =>
       'authors': instance.authors,
       'dependencies': instance.dependencies,
       'tags': instance.tags,
+      'hasDocs': instance.hasDocs,
     };

@@ -108,10 +108,11 @@
       <p>
         <a class="link" href="{{ package.homepage }}">Homepage</a><br />
         <a
+          *ngIf="package.hasDocs"
           class="link"
           href="/documentation/{{ package.name }}/{{ package.version }}/"
           >API reference</a
-        ><br />
+        ><br *ngIf="package.hasDocs" />
       </p>
 
       <h3 class="title">Author</h3>
