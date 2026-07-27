@@ -96,11 +96,19 @@ class MongoStore extends MetaStore {
       selector = selector.eq('uploaders', uploader);
     }
     if (dependency != null) {
-      selector = selector.raw({
-        'versions': {
-          r'$elemMatch': {
-            'pubspec.dependencies.$dependency': {r'$exists': true}
-          }
+      // Use eq() rather than raw(): raw() replaces the whole selector map,
+      // but the driver reads the filter from map['$query'], so a raw() filter
+      // is ignored (returning all packages) and sortBy/skip/limit are lost.
+      selector = selector.eq('versions', {
+        r'$elemMatch': {
+          r'$or': [
+            {
+              'pubspec.dependencies.$dependency': {r'$exists': true}
+            },
+            {
+              'pubspec.dev_dependencies.$dependency': {r'$exists': true}
+            },
+          ]
         }
       });
     }
