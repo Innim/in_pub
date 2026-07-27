@@ -17,7 +17,7 @@
       </p>
     </li>
   </ul>
-  <ul class="pagination">
+  <ul class="pagination" *ngIf="pageCount > 0">
     <li [class.-disabled]="currentPage == 0">
       <a [routerLink]="getListUrl(currentPage - 1)">
         <span>«</span>
