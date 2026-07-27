@@ -80,6 +80,14 @@ Notes:
 - A Dart SDK must be available on the server host (to run `dart pub get` and
   `dart doc`). The executable defaults to `dart` on `PATH`; override it with
   `in_pub.DocStore('./unpub-docs', dartExecutable: '/path/to/dart')`.
+- To document packages that depend on the **Flutter SDK** (`sdk: flutter`), the
+  configured Dart must be the one **bundled with Flutter**
+  (`<flutter>/bin/cache/dart-sdk/bin/dart`), not a standalone Dart SDK. A
+  standalone `dart` cannot locate the Flutter SDK, so `dart pub get` fails with
+  *"Flutter users should use `flutter pub` instead of `dart pub`"* and `dart doc`
+  cannot resolve `dart:ui`. Flutter's bundled Dart handles both Flutter and plain
+  Dart packages, so pointing `dartExecutable` at it (or running the server on a
+  host/image that has Flutter on `PATH`) is the simplest setup.
 - Generation resolves the package's dependencies, so the host needs network
   access and reachability of any private dependencies hosted on this server.
 - If `docStore` is not configured the `/documentation/...` route is disabled and
