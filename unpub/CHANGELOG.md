@@ -7,6 +7,7 @@
 - Markdown tables (and other GitHub-flavored elements like fenced code and strikethrough) now render correctly on package pages; table column alignment is preserved.
 - Dependency links on a package page now point to where each dependency is actually hosted: packages on this server link internally, pub.dev packages link to pub.dev, packages on another hosted server link to that server, and Flutter SDK dependencies link to the Flutter API docs. Previously every dependency was linked to this server, so pub.dev dependencies led to a "package not exists" page.
 - "Packages that depend on X" now actually filters the results instead of listing every package: the `dependency:` search filter was silently dropped by the Mongo query builder. The listing also now includes packages that use the target as a `dev_dependencies` entry, not only as a regular dependency.
+- The search box now reflects the active query when arriving via a link (e.g. "packages that depend on X" or any URL with a `?q=` filter); previously the results were filtered but the search field stayed empty. The field is also cleared again when leaving the results for a package page or the home page.
 
 ## 3.2.2
 

@@ -44,6 +44,7 @@ class ListComponent implements OnInit, OnActivate {
   @override
   void onActivate(RouterState? previous, RouterState current) async {
     q = current.queryParameters['q'];
+    appService.keyword = q ?? '';
     currentPage = int.tryParse(current.queryParameters['page'] ?? '0') ?? 0;
     appService.setLoading(true);
     data = await appService.fetchPackages(size: size, page: currentPage, q: q);

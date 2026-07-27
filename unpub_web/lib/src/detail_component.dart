@@ -69,6 +69,7 @@ class DetailComponent implements OnInit, OnActivate {
 
   @override
   void onActivate(RouterState? _, RouterState current) async {
+    appService.keyword = '';
     final name = current.parameters['name'];
     final version = current.parameters['version'];
 
