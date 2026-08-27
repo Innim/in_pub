@@ -5,3 +5,49 @@
 .home-banner {
   padding-bottom: 20px;
 }
+
+/* Signed-in user, at the right-hand end of the dark site header.
+   `.nav-wrap` is a space-between flex row, so being a sibling of
+   `.nav-header` is enough to push this to the far side. */
+.site-user {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: #f8f9fa;
+  white-space: nowrap;
+  padding-right: 4px;
+}
+
+.site-user > .name,
+.site-user > .link {
+  color: #b9c6d2;
+  text-decoration: none;
+  margin-left: 16px;
+}
+
+.site-user > .name {
+  color: #f8f9fa;
+  font-weight: 500;
+  /* A long display name must not push the sign-out link off the header. */
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.site-user > .name:hover,
+.site-user > .link:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  /* The header collapses on narrow screens; keep the identity and drop the
+     extras rather than wrapping the row. Signing out stays reachable: the
+     name links to the sessions page, which has the button. */
+  .site-user > .link {
+    display: none;
+  }
+  .site-user > .name {
+    max-width: 120px;
+  }
+}

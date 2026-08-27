@@ -13,6 +13,13 @@
         <div class="_flex-space"></div>
         <button class="close"></button>
       </div>
+      <div class="site-user" *ngIf="signedIn">
+        <a class="name" href="/auth/sessions" title="Your sessions"
+          >{{userName}}</a
+        >
+        <a class="link" *ngIf="isAdmin" href="/auth/admin">Administration</a>
+        <a class="link" href="/auth/logout">Sign out</a>
+      </div>
     </div>
   </div>
 </header>

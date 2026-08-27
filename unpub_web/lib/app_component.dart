@@ -13,10 +13,30 @@ import 'app_service.dart';
   exports: [RoutePaths, Routes],
   providers: [ClassProvider(AppService)],
 )
-class AppComponent {
+class AppComponent implements OnInit {
   final AppService appService;
   final Router _router;
-  AppComponent(this.appService, this._router);
+  final NgZone _zone;
+  AppComponent(this.appService, this._router, this._zone);
+
+  CurrentUser? _user;
+
+  @override
+  void ngOnInit() {
+    // Nothing depends on the answer, so the header simply fills in once it
+    // arrives rather than holding up the page.
+    appService.fetchCurrentUser().then((user) {
+      // Applied through the zone rather than assigned directly: the answer
+      // comes back from an http callback, and only a turn that ends inside
+      // the Angular zone schedules a change detection pass. Without this the
+      // field is set and the header never redraws.
+      _zone.run(() => _user = user);
+    });
+  }
+
+  bool get signedIn => _user != null;
+  String get userName => _user?.name ?? '';
+  bool get isAdmin => _user?.isAdmin ?? false;
 
   submit() async {
     if (appService.keyword == '') {

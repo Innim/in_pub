@@ -25,6 +25,8 @@ dependencies:
   path: ^1.6.2
   collection: ^1.15.0
   shelf_cors_headers: ^0.1.2
+  crypto: ^3.0.0
+  pointycastle: ^3.9.0
 dev_dependencies:
   test: ^1.25.0
   build_runner: ^2.4.0
