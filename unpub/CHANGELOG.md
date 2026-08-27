@@ -1,4 +1,22 @@
 
+## 3.4.0
+
+### Added
+- Optional sign-in for the web UI through any OpenID Connect provider. Enabled with `--auth`; off by default, so existing deployments are unaffected. `dart pub get` and `dart pub publish` are deliberately untouched for now — only the web UI, its data endpoints and the generated API documentation require a session.
+  - Sessions are stored server side and can be ended: your own at `/auth/sessions`, anyone else's at `/auth/admin` for members of `--auth-admin-groups`. Blocking a user there is independent of the identity provider and survives them signing in again.
+  - A copied session cookie is detected. The session secret is re-issued on an interval, and once the browser has used the new one, a request still carrying the previous one means two clients hold the session; it is ended for both (or for all of that user's sessions with `--auth-reuse-kills-all`). A client that merely missed a cookie update is re-issued a working secret rather than locked out.
+  - Access follows the identity provider without a second manual step. Signed-in users are re-checked on `--auth-revalidate-interval` by refreshing their grant and reading their profile, so disabling or deleting an account there, or removing it from `--auth-allowed-groups`, ends every session here within that interval. An unreachable provider is not treated as a revocation, but users who stay unverified past `--auth-revalidate-hard` stop being served.
+  - Access can be limited to provider groups with `--auth-allowed-groups`. Behind a reverse proxy, set `--auth-trusted-proxies` so `X-Forwarded-For` is honoured; without it the header is ignored and sessions record the proxy's address.
+
+- `--verbose` (`-v`), which logs the whole exchange with the identity provider — discovery, endpoints, token requests and the provider's own error responses — so a sign-in that fails can be diagnosed. Secrets, tokens and authorization codes are never printed.
+
+### Changed
+- `401` responses now carry a `message` parameter in the `WWW-Authenticate` header, which `dart pub` prints back to the user.
+- The web UI header shows the signed-in user, with links to their sessions, to the administration page (for administrators) and to sign out. Nothing is shown when the server runs without `--auth`.
+
+### Fixed
+- The page now references the web UI bundle by content hash (`main.dart.js?v=...`), and both it and `/` are served with `Cache-Control: no-cache` and an entity tag. Previously the bundle was served from a fixed url with no cache headers at all, so a browser — or worse, a CDN or tunnel in front of the server, which may cache a plain `.js` url on its own terms — kept serving the build from before an upgrade, for hours and for everyone. That looked exactly like the new build not working. Unchanged assets still answer `304`, so nothing is re-downloaded needlessly.
+
 ## 3.3.0
 
 ### Added

@@ -5,3 +5,8 @@ export 'src/file_store.dart';
 export 'src/doc_store.dart';
 export 'src/app.dart';
 export 'src/models.dart';
+export 'src/auth/auth_config.dart';
+export 'src/auth/auth_service.dart';
+export 'src/auth/auth_store.dart';
+export 'src/auth/identity.dart';
+export 'src/auth/mongo_auth_store.dart';

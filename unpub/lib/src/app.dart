@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:collection/collection.dart' show IterableExtension;
+import 'package:crypto/crypto.dart' show sha1;
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:http/http.dart' as http;
@@ -19,6 +20,7 @@ import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
 import 'package:in_pub/src/doc_store.dart';
 import 'package:in_pub/src/doc_progress_page.dart';
+import 'package:in_pub/src/auth/auth_service.dart';
 import 'package:path/path.dart' as p;
 import 'utils.dart';
 import 'auth_exception.dart';
@@ -43,6 +45,10 @@ class App {
   /// upstream url, default: https://pub.dev
   final String upstream;
 
+  /// when non-null, browsing the repository requires a signed-in user; see
+  /// `lib/src/auth/`. Null leaves the server open, as it was before.
+  final AuthService? auth;
+
   /// http(s) proxy to call googleapis (to get uploader email)
   final String? googleapisProxy;
   final String? overrideUploaderEmail;
@@ -62,6 +68,7 @@ class App {
     required this.metaStore,
     required this.packageStore,
     this.docStore,
+    this.auth,
     this.upstream = 'https://pub.dev',
     this.googleapisProxy,
     this.overrideUploaderEmail,
@@ -93,16 +100,28 @@ class App {
         }),
       );
 
+  /// 401 for the pub client.
+  ///
+  /// `dart pub` prints the `message` parameter of the `WWW-Authenticate`
+  /// header back to the user, so it is the one place where a hint about how
+  /// to authenticate actually reaches them.
   static shelf.Response _unauthorized(String message) => shelf.Response(
         HttpStatus.unauthorized,
         headers: {
           HttpHeaders.contentTypeHeader: ContentType.json.mimeType,
-          HttpHeaders.wwwAuthenticateHeader: 'Bearer',
+          HttpHeaders.wwwAuthenticateHeader:
+              'Bearer realm="pub", message="${_quoteHeaderValue(message)}"',
         },
         body: json.encode({
           'error': {'message': message}
         }),
       );
+
+  /// Makes [value] safe to place inside a quoted HTTP header parameter.
+  static String _quoteHeaderValue(String value) => value
+      .replaceAll('\\', r'\\')
+      .replaceAll('"', r'\"')
+      .replaceAll(RegExp(r'[\r\n]+'), ' ');
 
   http.Client? _googleapisClient;
 
@@ -143,10 +162,23 @@ class App {
   }
 
   Future<HttpServer> serve([String host = '0.0.0.0', int port = 4000]) async {
-    var handler = const shelf.Pipeline()
+    var authService = auth;
+    if (authService != null) await authService.start();
+
+    var pipeline = const shelf.Pipeline()
         .addMiddleware(corsHeaders())
-        .addMiddleware(shelf.logRequests())
-        .addHandler((req) async {
+        .addMiddleware(shelf.logRequests());
+    // The gate sits inside request logging so refusals are logged, and
+    // outside the router so a route that does not exist cannot be probed
+    // without a session.
+    if (authService != null)
+      pipeline = pipeline.addMiddleware(authService.gate);
+
+    var handler = pipeline.addHandler((req) async {
+      if (authService != null && req.requestedUri.path.startsWith('/auth/')) {
+        var authResponse = await authService.handler(req);
+        if (authResponse.statusCode != HttpStatus.notFound) return authResponse;
+      }
       // Return 404 by default
       // https://github.com/google/dart-neats/issues/1
       var res = await router.call(req);
@@ -817,19 +849,67 @@ class App {
     return DependencyView(name, url: 'https://pub.dev/packages/$name');
   }
 
+  /// The embedded web assets and their entity tags, computed on first use.
+  /// Both are fixed for the life of the process, and the bundle is large
+  /// enough that neither rendering nor hashing it belongs on a request path.
+  String? _indexHtmlBody, _indexHtmlEtag;
+  String? _mainDartJsBody, _mainDartJsEtag;
+
+  static String _etagOf(String body) =>
+      '"${sha1.convert(utf8.encode(body)).toString().substring(0, 16)}"';
+
+  String get _mainDartJs => _mainDartJsBody ??= main_dart_js.content({});
+  String get _mainDartJsTag => _mainDartJsEtag ??= _etagOf(_mainDartJs);
+
+  /// The page, with the script reference stamped with the bundle's content
+  /// hash.
+  ///
+  /// `no-cache` on `/main.dart.js` asks a browser to revalidate, but it is
+  /// only a request, and anything sitting in front of this server — a CDN, a
+  /// tunnel, a corporate proxy — may cache a plain `.js` url on its own
+  /// terms and keep serving the previous release for hours. A url that
+  /// changes with the content cannot be stale: the page itself is never
+  /// cached, so it always points at the build that is actually running.
+  String get _indexHtml => _indexHtmlBody ??= index_html
+      .content({'APP_VERSION': version}).replaceFirst('src="main.dart.js"',
+          'src="main.dart.js?v=${_mainDartJsTag.replaceAll('"', '')}"');
+
+  String get _indexHtmlTag => _indexHtmlEtag ??= _etagOf(_indexHtml);
+
+  /// Serves one of the embedded assets with revalidation.
+  ///
+  /// Their urls carry no version, so a browser left to its own devices will
+  /// happily keep serving the bundle it downloaded before an upgrade — which
+  /// looks exactly like the new build not working. `no-cache` makes it ask
+  /// every time; the entity tag keeps that question cheap by answering 304
+  /// when nothing changed.
+  shelf.Response _staticAsset(
+      shelf.Request req, String body, String etag, String contentType) {
+    if (req.headers[HttpHeaders.ifNoneMatchHeader] == etag) {
+      return shelf.Response.notModified(headers: {
+        HttpHeaders.cacheControlHeader: 'no-cache',
+        HttpHeaders.etagHeader: etag,
+      });
+    }
+    return shelf.Response.ok(body, headers: {
+      HttpHeaders.contentTypeHeader: contentType,
+      HttpHeaders.cacheControlHeader: 'no-cache',
+      HttpHeaders.etagHeader: etag,
+    });
+  }
+
   @Route.get('/')
   @Route.get('/packages')
   @Route.get('/packages/<name>')
   @Route.get('/packages/<name>/versions/<version>')
   Future<shelf.Response> indexHtml(shelf.Request req) async {
-    return shelf.Response.ok(index_html.content({'APP_VERSION': version}),
-        headers: {HttpHeaders.contentTypeHeader: ContentType.html.mimeType});
+    return _staticAsset(
+        req, _indexHtml, _indexHtmlTag, ContentType.html.mimeType);
   }
 
   @Route.get('/main.dart.js')
   Future<shelf.Response> mainDartJs(shelf.Request req) async {
-    return shelf.Response.ok(main_dart_js.content({}),
-        headers: {HttpHeaders.contentTypeHeader: 'text/javascript'});
+    return _staticAsset(req, _mainDartJs, _mainDartJsTag, 'text/javascript');
   }
 
   @Route.get('/logo')
