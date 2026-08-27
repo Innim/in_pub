@@ -1,5 +1,5 @@
 
-## Unreleased
+## 3.4.0
 
 ### Added
 - Optional sign-in for the web UI through any OpenID Connect provider. Enabled with `--auth`; off by default, so existing deployments are unaffected. `dart pub get` and `dart pub publish` are deliberately untouched for now — only the web UI, its data endpoints and the generated API documentation require a session.
