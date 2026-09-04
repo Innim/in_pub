@@ -1,0 +1,68 @@
+<div class="admin" *ngIf="loaded">
+  <h1 class="title">Administration</h1>
+
+  <p class="error" *ngIf="error != null">{{error}}</p>
+
+  <p class="hint" *ngIf="forbidden">
+    This section is limited to administrators.
+    <a [routerLink]="RoutePaths.home.toUrl()">Back to packages</a>
+  </p>
+
+  <div *ngIf="hasView">
+    <p class="hint" *ngIf="truncated">
+      Only the first {{users.length}} accounts are shown; there are more.
+    </p>
+    <p class="hint">
+      Blocking someone here is independent of the identity provider: it keeps
+      them out of this repository while their account elsewhere is untouched,
+      and survives them signing in again. Accounts disabled on the provider are
+      picked up on their own and show as revoked.
+    </p>
+
+    <table class="data-table">
+      <tr>
+        <th>User</th><th>Groups</th><th>Status</th>
+        <th>Sessions</th><th>Last checked</th><th></th>
+      </tr>
+      <tr *ngFor="let user of users">
+        <td>
+          <strong>{{user.name}}</strong>
+          <div class="muted">{{user.email.isEmpty ? user.id : user.email}}</div>
+        </td>
+        <td class="muted">{{groupsOf(user)}}</td>
+        <td>
+          <span class="tag" [class.-bad]="isBlocked(user)">{{statusLabel(user)}}</span>
+          <div class="muted" *ngIf="user.blockedReason != null">{{user.blockedReason}}</div>
+        </td>
+        <td>{{user.liveSessions}}</td>
+        <td class="muted">{{formatDate(user.lastValidatedAt)}}</td>
+        <td class="actions">
+          <button
+            *ngIf="user.liveSessions > 0"
+            class="btn -small -quiet"
+            [disabled]="busy"
+            (click)="act(user, 'end-sessions')">End sessions</button>
+          <button
+            *ngIf="!isBlockedHere(user) && !isSelf(user)"
+            class="btn -small -danger"
+            [disabled]="busy"
+            (click)="act(user, 'block')">Block</button>
+          <button
+            *ngIf="isBlockedHere(user)"
+            class="btn -small -quiet"
+            [disabled]="busy"
+            (click)="act(user, 'unblock')">Unblock</button>
+          <button
+            *ngIf="canRestore(user)"
+            class="btn -small -quiet"
+            [disabled]="busy"
+            (click)="act(user, 'unblock')">Restore</button>
+        </td>
+      </tr>
+    </table>
+
+    <p style="margin-top: 24px">
+      <a class="btn -quiet" [routerLink]="RoutePaths.account.toUrl()">Your account</a>
+    </p>
+  </div>
+</div>

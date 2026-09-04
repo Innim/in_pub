@@ -25,13 +25,29 @@ class FakeIdentityProvider implements IdentityProvider {
                 displayName: 'Someone',
                 groups: ['developers']);
 
+  /// Whether the last authorization url asked for a fresh consent.
+  bool consentForced = false;
+
+  /// What [authorizationUrl] does. Replace to simulate a provider that
+  /// cannot be reached at the moment a sign-in starts.
+  Object? authorizationError;
+
   @override
   Future<Uri> authorizationUrl({
     required String state,
     required String nonce,
     required String codeChallenge,
-  }) async =>
-      Uri.parse('https://idp.example.org/authorize?state=$state');
+    bool forceConsent = false,
+  }) async {
+    var error = authorizationError;
+    if (error != null) throw error;
+    consentForced = forceConsent;
+    return Uri.parse('https://idp.example.org/authorize?state=$state');
+  }
+
+  /// What the token exchange hands back. Null stands in for a provider that
+  /// issues a refresh token only on first consent.
+  String? initialRefreshToken = 'refresh-1';
 
   @override
   Future<OidcTokens> exchangeCode({
@@ -39,7 +55,7 @@ class FakeIdentityProvider implements IdentityProvider {
     required String codeVerifier,
     required String nonce,
   }) async =>
-      OidcTokens(accessToken: 'access-1', refreshToken: 'refresh-1');
+      OidcTokens(accessToken: 'access-1', refreshToken: initialRefreshToken);
 
   @override
   Future<OidcTokens> refresh(String refreshToken) async {

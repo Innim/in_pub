@@ -14,10 +14,10 @@
         <button class="close"></button>
       </div>
       <div class="site-user" *ngIf="signedIn">
-        <a class="name" href="/auth/sessions" title="Your sessions"
+        <a class="name" [routerLink]="accountUrl" title="Your account"
           >{{userName}}</a
         >
-        <a class="link" *ngIf="isAdmin" href="/auth/admin">Administration</a>
+        <a class="link" *ngIf="isAdmin" [routerLink]="adminUrl">Administration</a>
         <a class="link" href="/auth/logout">Sign out</a>
       </div>
     </div>

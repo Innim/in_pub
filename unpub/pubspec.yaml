@@ -24,7 +24,15 @@ dependencies:
   intl: ^0.17.0
   path: ^1.6.2
   collection: ^1.15.0
-  shelf_cors_headers: ^0.1.2
+  # 0.1.5, not 0.1.2: the `Access-Control-Allow-Origin` passed to
+  # `corsHeaders` is honoured only from that version. Before it the header
+  # was overwritten with the caller's own origin unconditionally, so the
+  # wildcard `App.serve` sends on an --auth-off server would have been
+  # reflected back with credentials allowed — precisely what the CHANGELOG
+  # says was removed. 0.1.5 also reversed the merge order so a response's own
+  # headers win, which `App._okWithJson` and the auth gate's `Vary` both
+  # depend on.
+  shelf_cors_headers: ^0.1.5
   crypto: ^3.0.0
   pointycastle: ^3.9.0
 dev_dependencies:

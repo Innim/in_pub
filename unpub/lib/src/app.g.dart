@@ -105,6 +105,16 @@ Router _$AppRouter(App service) {
   );
   router.add(
     'GET',
+    r'/account',
+    service.indexHtml,
+  );
+  router.add(
+    'GET',
+    r'/admin',
+    service.indexHtml,
+  );
+  router.add(
+    'GET',
     r'/main.dart.js',
     service.mainDartJs,
   );

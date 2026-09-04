@@ -1,0 +1,150 @@
+/* Only what the application's own stylesheet does not already provide.
+   Tabs and the container come from there; buttons do not. The shared
+   stylesheet overrides the *background* of Material Components buttons and
+   nothing else, because it expects that library to supply the padding, size
+   and text colour — and this app does not ship it. Using those classes
+   yields black text on dark blue at no height at all, so `.btn` is defined
+   in the shared stylesheet instead. */
+.account {
+  margin: 24px 0 60px;
+}
+
+.title {
+  font-size: 24px;
+  margin: 0 0 4px;
+}
+
+.subtitle {
+  color: #6e6e73;
+  font-size: 14px;
+  margin: 0;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 20px;
+  background: #e8f5e9;
+  color: #256029;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.hint {
+  color: #555;
+  font-size: 14px;
+  max-width: 70ch;
+}
+
+.error {
+  color: #c62828;
+  font-weight: 500;
+}
+
+.current {
+  font-weight: 600;
+  color: #0175c2;
+}
+
+.create {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+
+.create label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #6e6e73;
+}
+
+.create input,
+.create select {
+  font: inherit;
+  font-size: 14px;
+  padding: 7px 9px;
+  border: 1px solid #d2d2d7;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.create input[type="text"],
+.create input[type="email"] {
+  min-width: 220px;
+}
+
+.reveal {
+  background: #f0f7ff;
+  border: 1px solid #cfe4ff;
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin-bottom: 28px;
+}
+
+.reveal h2 {
+  margin-top: 0;
+  font-size: 18px;
+}
+
+/* The value and its copy button share a row, with the button riding on top
+   of the dark block rather than pushing it around. */
+.value {
+  position: relative;
+}
+
+.value > .copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f5f5f7;
+  cursor: pointer;
+}
+
+.value > .copy:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Room for the button, so a long token never runs underneath it. */
+.value > pre {
+  padding-right: 50px;
+  margin: 0 0 12px;
+}
+
+.reveal pre {
+  background: #1d1d1f;
+  color: #f5f5f7;
+  padding: 12px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.reveal pre.token {
+  border: 2px solid #0175c2;
+}
+
+.service {
+  margin-top: 44px;
+  padding-top: 12px;
+  border-top: 1px solid #ececf0;
+}
+
+.service h2 {
+  font-size: 18px;
+}

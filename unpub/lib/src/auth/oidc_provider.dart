@@ -183,6 +183,7 @@ class OidcProvider implements IdentityProvider {
     required String state,
     required String nonce,
     required String codeChallenge,
+    bool forceConsent = false,
   }) async {
     var discovery = await discover();
     var url = discovery.authorizationEndpoint.replace(queryParameters: {
@@ -195,6 +196,7 @@ class OidcProvider implements IdentityProvider {
       'nonce': nonce,
       'code_challenge': codeChallenge,
       'code_challenge_method': 'S256',
+      if (forceConsent) 'prompt': 'consent',
     });
     // Worth logging whole: it contains no secret, and comparing it against
     // what the provider has registered is how a redirect uri or scope
@@ -230,14 +232,16 @@ class OidcProvider implements IdentityProvider {
     var idToken = tokens.idToken;
     if (idToken != null) _verifyIdToken(idToken, nonce);
 
-    // Without a refresh token we can never ask the provider whether this
-    // account still exists, so a session would outlive a revocation. Fail
-    // loudly at login rather than silently degrade.
+    // A missing refresh token is *reported*, not thrown. Whether it matters
+    // is not knowable here: the account may already hold a usable one from
+    // an earlier consent, and providers that issue one only on the first
+    // consent return none on every later sign-in. Throwing made the
+    // callback's whole recovery path — try the stored token, then ask the
+    // provider to prompt for consent again — unreachable, and turned an
+    // ordinary second sign-in into a 503. The callback decides.
     if (tokens.refreshToken == null) {
-      throw IdentityUnavailableException(
-          'the provider returned no refresh token: enable the '
-          '"offline_access" scope for this client so revoked accounts can be '
-          'detected');
+      _log.info('the token response carried no refresh token; the sign-in '
+          'will fall back to the stored one or ask for consent again');
     }
     return tokens;
   }
@@ -359,14 +363,26 @@ class OidcProvider implements IdentityProvider {
     _log.fine('token: HTTP ${res.statusCode}');
 
     if (res.statusCode == 200) {
-      var json_ = json.decode(res.body) as Map<String, dynamic>;
-      var expiresIn = json_['expires_in'];
-      _log.fine('token: got ${json_.keys.join(', ')} '
+      // Checked rather than cast. A 200 whose body is not a token response —
+      // an HTML page from a captive portal or a proxy, a provider with a
+      // half-configured client — otherwise threw a raw `TypeError` past both
+      // identity exceptions, which is all any caller here handles, and
+      // surfaced as an unstyled 500 in the middle of a sign-in.
+      var decoded = _asJsonObject(res.body);
+      var accessToken = decoded?['access_token'];
+      if (accessToken is! String || accessToken.isEmpty) {
+        _log.warning('token: HTTP 200 with no usable access_token; body: '
+            '${_truncate(res.body)}');
+        throw IdentityUnavailableException(
+            'the identity provider returned an unusable token response');
+      }
+      var expiresIn = decoded!['expires_in'];
+      _log.fine('token: got ${decoded.keys.join(', ')} '
           '(expires_in: ${expiresIn ?? 'unset'})');
       return OidcTokens(
-        accessToken: json_['access_token'] as String,
-        refreshToken: json_['refresh_token'] as String?,
-        idToken: json_['id_token'] as String?,
+        accessToken: accessToken,
+        refreshToken: _asString(decoded['refresh_token']),
+        idToken: _asString(decoded['id_token']),
         accessTokenExpiresAt: expiresIn is num
             ? DateTime.now().add(Duration(seconds: expiresIn.toInt()))
             : null,
@@ -376,11 +392,9 @@ class OidcProvider implements IdentityProvider {
     String? error;
     String? description;
     if (res.statusCode >= 400 && res.statusCode < 500) {
-      try {
-        var body = json.decode(res.body) as Map<String, dynamic>;
-        error = body['error'] as String?;
-        description = body['error_description'] as String?;
-      } catch (_) {}
+      var body = _asJsonObject(res.body);
+      error = _asString(body?['error']);
+      description = _asString(body?['error_description']);
     }
     // The body carries no secret of ours, only the provider's complaint.
     _log.fine('token: response body: ${_truncate(res.body)}');
@@ -416,6 +430,22 @@ class OidcProvider implements IdentityProvider {
   /// `application/x-www-form-urlencoded` escaping, as RFC 6749 §2.3.1 asks
   /// for before base64-encoding Basic credentials.
   static String _formEncode(String value) => Uri.encodeQueryComponent(value);
+
+  /// Decodes a body that should be a JSON object, or null if it is anything
+  /// else. Providers do answer with HTML, and a cast throws a kind of error
+  /// no caller here is prepared for.
+  static Map<String, dynamic>? _asJsonObject(String body) {
+    try {
+      var decoded = json.decode(body);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// A value when it really is a string. Providers have been known to send
+  /// numbers and arrays where the spec says string.
+  static String? _asString(Object? value) => value is String ? value : null;
 
   static String _truncate(String value, [int max = 512]) =>
       value.length <= max ? value : '${value.substring(0, max)}…';
@@ -540,9 +570,13 @@ class OidcProvider implements IdentityProvider {
 
     return AuthenticatedUser(
       id: sub,
-      email: (claims['email'] as String?) ?? '',
-      displayName: (claims['name'] as String?) ??
-          (claims['preferred_username'] as String?) ??
+      // Read, not cast. `sub` above is checked because nothing works
+      // without it; these three are optional, and a provider sending a
+      // number or an object where the spec says string should cost a field,
+      // not throw a `TypeError` past every handler on the sign-in path.
+      email: _asString(claims['email']) ?? '',
+      displayName: _asString(claims['name']) ??
+          _asString(claims['preferred_username']) ??
           sub,
       groups: groups.toSet().toList(),
     );

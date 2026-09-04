@@ -81,17 +81,63 @@ class AuthConfig {
   /// as unvalidatable. Provider downtime must not look like a revocation.
   final int revalidateMaxFailures;
 
+  /// How long an expired or revoked token is kept before the sweep drops it.
+  ///
+  /// Long enough that whoever presents one is told which it was, rather than
+  /// that it is simply unknown; after that the record is only bulk.
+  final Duration tokenRetention;
+
   /// Send the user through the provider's `end_session_endpoint` on logout,
   /// signing them out there as well as here.
   final bool rpInitiatedLogout;
 
   /// Drop the `Secure` attribute on cookies so the flow works over plain
   /// http. Local development only.
+  ///
+  /// A cookie attribute and nothing else. It used to double as the switch
+  /// that opened CORS to every localhost origin, which is a policy decision
+  /// it has no business making: an operator whose TLS terminates at a
+  /// reverse proxy sets this for the reason its name gives, and thereby let
+  /// any page on any localhost port, on any scheme, read
+  /// `/auth/api/account` with the visitor's cookies attached — credentials
+  /// stay allowed and `x-csrf-token` is an allowed request header, so that
+  /// page could lift the anti-forgery token out of the answer and drive
+  /// `/auth/api/admin/action` with it. [devOrigins] states the policy
+  /// instead.
   final bool insecureCookie;
 
-  /// Leave `/badge/*` and `/logo` reachable without a session, so badges
+  /// Origins allowed to read this server's JSON endpoints cross-origin, on
+  /// top of the one [publicUrl] names (`--auth-dev-origins`).
+  ///
+  /// Empty in production. It exists for a tool or a page run from another
+  /// port against a development server, and it is stated rather than
+  /// inferred because every entry is credentialed access to somebody's
+  /// account data: the CORS answer carries
+  /// `Access-Control-Allow-Credentials: true`, so a page on a listed origin
+  /// reads what the visitor's cookies open.
+  ///
+  /// Listing an origin is still not enough to exercise authentication
+  /// through `make dev-web`: the browser client sends no cookies
+  /// cross-origin, so those requests arrive unauthenticated whatever the
+  /// CORS headers say. README's "Trying it locally" is the accurate account.
+  final List<String> devOrigins;
+
+  /// Leave `/badge/*` reachable without a session, so badges
   /// embedded in READMEs keep rendering.
+  ///
+  /// Unstated, it follows the opposite of [protectPubApi]: a badge answers
+  /// differently for a package that exists, so leaving them open hands out
+  /// the private names and their latest versions — the very thing closing
+  /// the pub API is for.
   final bool publicBadges;
+
+  /// Require a bearer token for the pub client's own endpoints — package
+  /// metadata and the tarballs themselves.
+  ///
+  /// Off by default and separate from [enabled] on purpose: turning it on
+  /// breaks every consumer that has not yet run `dart pub token add`, so it
+  /// has to be a deliberate step taken once the tokens are handed out.
+  final bool protectPubApi;
 
   AuthConfig({
     required this.enabled,
@@ -113,43 +159,95 @@ class AuthConfig {
     this.revalidateInterval = const Duration(minutes: 5),
     this.revalidateHard = const Duration(minutes: 30),
     this.revalidateMaxFailures = 3,
+    this.tokenRetention = const Duration(days: 30),
     this.rpInitiatedLogout = false,
     this.insecureCookie = false,
-    this.publicBadges = true,
-  });
+    this.devOrigins = const [],
+    bool? publicBadges,
+    this.protectPubApi = false,
+  }) : publicBadges = publicBadges ?? !protectPubApi;
 
   /// A config with the feature switched off. Used when `--auth` is absent.
-  factory AuthConfig.disabled() => AuthConfig(
+  ///
+  /// [protectPubApi], [publicBadges] and [devOrigins] are carried through
+  /// even so, because asking for any of them without authentication is a
+  /// mistake [validate] has to be able to see. Dropping the badge flag here
+  /// made `--no-auth-public-badges` a silent no-op on a server without
+  /// `--auth`: badges went on being served to everyone while the operator
+  /// believed they were closed, which is the outcome the neighbouring check
+  /// refuses to start over.
+  factory AuthConfig.disabled({
+    bool protectPubApi = false,
+    bool? publicBadges,
+    List<String> devOrigins = const [],
+  }) =>
+      AuthConfig(
         enabled: false,
         issuer: '',
         clientId: '',
         clientSecret: '',
         publicUrl: Uri.parse('http://localhost'),
         secret: const [],
+        protectPubApi: protectPubApi,
+        publicBadges: publicBadges,
+        devOrigins: devOrigins,
       );
+
+  /// [value] as a browser spells it in the `Origin` header, or null when it
+  /// is not something a browser could send.
+  ///
+  /// Shared by [validate] and the CORS check, so an entry that would match
+  /// nothing is refused at startup rather than quietly ignored. A path,
+  /// query, fragment or user-info is refused rather than trimmed off: an
+  /// origin has none of them, and accepting one would let an entry read as
+  /// though it scoped the permission to part of a site, or to a particular
+  /// user, which no browser would honour.
+  ///
+  /// The port is checked too. `Uri` will carry `-1` or `99999` without
+  /// complaint and `origin` hands them back verbatim, which is an origin no
+  /// browser can ever send — so the entry would match nothing while looking
+  /// exactly like one that does.
+  static String? originOf(String value) {
+    var uri = Uri.tryParse(value.trim());
+    if (uri == null) return null;
+    if (uri.scheme != 'http' && uri.scheme != 'https') return null;
+    if (uri.host.isEmpty) return null;
+    if (uri.path.isNotEmpty && uri.path != '/') return null;
+    if (uri.hasQuery || uri.hasFragment) return null;
+    if (uri.userInfo.isNotEmpty) return null;
+    if (uri.hasPort && (uri.port < 1 || uri.port > 65535)) return null;
+    return uri.origin;
+  }
+
+  /// Every origin this server answers cross-origin for.
+  ///
+  /// Built once by the caller that installs the CORS middleware. Unparseable
+  /// entries are dropped, which [validate] has already refused startup over.
+  Set<String> get allowedOrigins {
+    var origins = <String>{publicUrl.origin};
+    for (var stated in devOrigins) {
+      var origin = originOf(stated);
+      if (origin != null) origins.add(origin);
+    }
+    return origins;
+  }
 
   Uri get redirectUri => resolvePath('auth/callback');
 
-  /// Resolves [path] against [publicUrl], keeping any path prefix.
+  /// An absolute url for [path] on this server.
   ///
-  /// `Uri.resolve` would drop it: against `https://example.org/pub` it reads
-  /// `pub` as a file name and yields `https://example.org/auth/callback`,
-  /// which then fails the provider's redirect uri check on any deployment
-  /// mounted under a sub-path.
-  Uri resolvePath(String path) {
-    var base = publicUrl.path;
-    if (!base.endsWith('/')) base = '$base/';
-    // Built up rather than derived with `replace`, which keeps any query and
-    // fragment the configured url happens to carry: a redirect uri with
-    // either would not match what the provider was told.
-    return Uri(
-      scheme: publicUrl.scheme,
-      userInfo: publicUrl.userInfo,
-      host: publicUrl.host,
-      port: publicUrl.hasPort ? publicUrl.port : null,
-      path: '$base$path',
-    );
-  }
+  /// Built up rather than derived with `Uri.resolve` or `replace`, either of
+  /// which would carry along a query or fragment the configured url happens
+  /// to have — a redirect uri with one would not match what the provider was
+  /// told. [validate] refuses a public url with a path prefix, so there is
+  /// none to preserve here.
+  Uri resolvePath(String path) => Uri(
+        scheme: publicUrl.scheme,
+        userInfo: publicUrl.userInfo,
+        host: publicUrl.host,
+        port: publicUrl.hasPort ? publicUrl.port : null,
+        path: '/$path',
+      );
 
   /// `groups` carries group membership, which [allowedGroups] filters on;
   /// `offline_access` is what makes the provider hand out a refresh token,
@@ -172,7 +270,38 @@ class AuthConfig {
   /// Validates the parts that only matter once the feature is on, so a
   /// misconfigured server fails at startup rather than at first login.
   List<String> validate() {
-    if (!enabled) return const [];
+    if (!enabled) {
+      // Asking for the pub client to be closed without switching
+      // authentication on leaves the server wide open while the operator
+      // believes otherwise, which is worse than refusing to start.
+      return [
+        if (protectPubApi)
+          '--auth-protect-pub-api needs --auth: without it there is nothing '
+              'to authenticate against and the pub API stays open',
+        // Same reasoning, same guard. Only reported when the badge flag is
+        // the one that was actually stated: unstated, `publicBadges` follows
+        // the opposite of `protectPubApi`, so with that flag already
+        // reported above this would merely say it a second time.
+        if (!publicBadges && !protectPubApi)
+          '--no-auth-public-badges needs --auth: without it there is nothing '
+              'to authenticate against and the badges stay open',
+        // Not a hole — with `--auth` off the CORS answer is a wildcard with
+        // credentials refused, so an origin dropped here cannot make the
+        // server more permissive than it already is. What it is, is a flag
+        // that does nothing while reading as though it configured something,
+        // and the place a typo goes unnoticed: `validate` is the only thing
+        // that ever looks at an entry's shape, and it never reaches that
+        // loop for a disabled config. An operator who spells an origin wrong
+        // while trying `--auth` out finds out at the moment they turn it on,
+        // which is the moment they are least able to tell the two changes
+        // apart. Refused for the same reason as the two above — the flag
+        // should mean what it says or stop the server.
+        if (devOrigins.isNotEmpty)
+          '--auth-dev-origins needs --auth: without it the answer to every '
+              'cross-origin read is a wildcard with credentials refused, and '
+              'the origins named here are never consulted',
+      ];
+    }
     var errors = <String>[];
     if (issuer.isEmpty) errors.add('--auth-issuer is required');
     if (clientId.isEmpty) errors.add('--auth-client-id is required');
@@ -182,6 +311,33 @@ class AuthConfig {
     }
     if (!publicUrl.hasScheme || publicUrl.host.isEmpty) {
       errors.add('--auth-public-url must be an absolute url');
+    }
+    if (publicUrl.path.isNotEmpty && publicUrl.path != '/') {
+      // The built page carries `<base href="/">`, so every link the
+      // application makes resolves against the root regardless of where the
+      // server is mounted. Supporting a prefix would mean changing the
+      // build, not the redirects — until then, saying so beats half of it
+      // working.
+      errors.add('--auth-public-url must not include a path prefix: the web '
+          'interface is served from the root and cannot be mounted under '
+          '"${publicUrl.path}"');
+    }
+    if (publicUrl.hasScheme &&
+        publicUrl.scheme != 'http' &&
+        publicUrl.scheme != 'https') {
+      // Caught here rather than later: the origin is derived from this to
+      // restrict CORS, and `Uri.origin` throws for any other scheme — which
+      // would kill the process after the store and provider were wired up,
+      // saying nothing about which flag was wrong.
+      errors.add('--auth-public-url must be http or https, not '
+          '"${publicUrl.scheme}"');
+    }
+    for (var stated in devOrigins) {
+      if (originOf(stated) == null) {
+        errors.add('--auth-dev-origins entry "$stated" is not an origin: '
+            'expected a scheme, host and optional port, as in '
+            '"http://localhost:8080"');
+      }
     }
     if (secret.length < 32) errors.add('session secret is too short');
     if (revalidateHard < revalidateInterval) {

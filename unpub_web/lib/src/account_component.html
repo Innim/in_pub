@@ -1,0 +1,201 @@
+<div class="account" *ngIf="loaded">
+  <p class="error" *ngIf="error != null">{{error}}</p>
+
+  <div *ngIf="hasAccount">
+    <h1 class="title">{{displayName}}</h1>
+    <p class="subtitle">
+      {{email}}
+      <span *ngIf="groupsLabel.isNotEmpty"> · {{groupsLabel}}</span>
+      <span *ngIf="isAdmin" class="badge">administrator</span>
+    </p>
+
+    <ul class="detail-tabs-header">
+      <li class="tab-link" [class.-active]="tab == 'tokens'">
+        <a [routerLink]="tabUrl('tokens')">Tokens</a>
+      </li>
+      <li class="tab-link" [class.-active]="tab == 'sessions'">
+        <a [routerLink]="tabUrl('sessions')">Sessions</a>
+      </li>
+    </ul>
+
+    <!-- Tokens -->
+    <section *ngIf="tab == 'tokens'">
+      <div class="reveal" *ngIf="hasCreatedToken">
+        <h2>Token created</h2>
+        <p>Copy it now — it is not stored and cannot be shown again.</p>
+        <div *ngFor="let target of copyTargets">
+          <p *ngIf="target.key == 'command'">
+            Point the pub client at this repository:
+          </p>
+          <div class="value">
+          <pre [class.token]="target.key == 'token'"
+               [class.command]="target.key == 'command'">{{target.text}}</pre>
+          <button
+            class="copy"
+            type="button"
+            [title]="copied == target.key ? 'Copied' : target.label"
+            (click)="copy(target.key, target.text)">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <path
+                *ngIf="copied == target.key"
+                d="M3 8.5l3.4 3.4L13 5"
+                fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round"></path>
+              <g *ngIf="copied != target.key"
+                 fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M5.7 2.2h6.6a1 1 0 0 1 1 1v8.6"></path>
+                <rect x="2.4" y="4.6" width="8.6" height="9.2" rx="1"></rect>
+              </g>
+            </svg>
+            <span class="sr">{{target.label}}</span>
+          </button>
+          </div>
+        </div>
+        <p class="muted">
+          Paste the token when it asks. On CI, put it in a secret and use
+          <code>{{addTokenCommand}} --env-var PUB_TOKEN</code> instead, so it
+          never reaches a command line.
+        </p>
+        <button class="btn -quiet" (click)="dismissCreated()">Dismiss</button>
+      </div>
+
+      <p class="hint">
+        Tokens let <code>dart pub get</code> and <code>dart pub publish</code>
+        reach this repository.
+        <span *ngIf="pubApiProtected">A token is required.</span>
+        <span *ngIf="!pubApiProtected">
+          They work now, and become required once this server is switched to
+          private mode.
+        </span>
+      </p>
+
+      <table class="data-table" *ngIf="tokens.isNotEmpty">
+        <tr>
+          <th>Name</th><th>Created</th><th>Last used</th><th>Expires</th><th></th>
+        </tr>
+        <tr *ngFor="let token of tokens">
+          <td><strong>{{token.name}}</strong></td>
+          <td>{{formatDate(token.createdAt)}}</td>
+          <td>
+            {{formatDate(token.lastUsedAt)}}
+            <div class="muted" *ngIf="token.lastUsedIp != null">{{token.lastUsedIp}}</div>
+          </td>
+          <td>{{formatDate(token.expiresAt)}}</td>
+          <td class="actions">
+            <button
+              class="btn -small -danger"
+              [disabled]="busy"
+              (click)="revokeToken(token)">Revoke</button>
+          </td>
+        </tr>
+      </table>
+      <p class="muted" *ngIf="tokens.isEmpty">You have no tokens yet.</p>
+
+      <div class="create">
+        <label>Name
+          <input type="text" [(ngModel)]="newName" placeholder="laptop, release CI, …">
+        </label>
+        <label>Expires
+          <select [(ngModel)]="newLifetime">
+            <option [ngValue]="90">90 days</option>
+            <option [ngValue]="365">1 year</option>
+            <option [ngValue]="30">30 days</option>
+            <option [ngValue]="0">Never</option>
+          </select>
+        </label>
+        <button
+          class="btn"
+          [disabled]="busy || newName.trim().isEmpty"
+          (click)="createToken()">Create token</button>
+      </div>
+
+      <!-- Service tokens -->
+      <div *ngIf="isAdmin" class="service">
+        <h2>Service tokens</h2>
+        <p class="hint">
+          Tokens that belong to no account, for automation that has to keep
+          working when the person who set it up leaves. Nothing on the identity
+          provider can revoke one — only this page can, so keep the list short
+          and give each a name that says where it runs.
+        </p>
+
+        <table class="data-table" *ngIf="serviceTokens.isNotEmpty">
+          <tr>
+            <th>Name</th><th>Recorded as</th><th>Created by</th>
+            <th>Last used</th><th>Expires</th><th></th>
+          </tr>
+          <tr *ngFor="let token of serviceTokens">
+            <td><strong>{{token.name}}</strong></td>
+            <td>{{token.email}}</td>
+            <td>{{token.createdBy}}</td>
+            <td>{{formatDate(token.lastUsedAt)}}</td>
+            <td>{{formatDate(token.expiresAt)}}</td>
+            <td class="actions">
+              <button
+                class="btn -small -danger"
+                [disabled]="busy"
+                (click)="revokeToken(token)">Revoke</button>
+            </td>
+          </tr>
+        </table>
+        <p class="muted" *ngIf="serviceTokens.isEmpty">No service tokens.</p>
+
+        <div class="create">
+          <label>Name
+            <input type="text" [(ngModel)]="newServiceName" placeholder="release pipeline">
+          </label>
+          <label>Recorded as
+            <input type="email" [(ngModel)]="newServiceEmail" placeholder="ci@example.org">
+          </label>
+          <label>Expires
+            <select [(ngModel)]="newServiceLifetime">
+              <option [ngValue]="0">Never</option>
+              <option [ngValue]="365">1 year</option>
+              <option [ngValue]="90">90 days</option>
+            </select>
+          </label>
+          <button
+            class="btn"
+            [disabled]="busy || newServiceName.trim().isEmpty || newServiceEmail.trim().isEmpty"
+            (click)="createServiceToken()">Create service token</button>
+        </div>
+      </div>
+    </section>
+    <!-- Sessions -->
+    <section *ngIf="tab == 'sessions'">
+      <p class="hint">
+        Every browser signed in as you. If you see one you do not recognise,
+        end it and change your password on the identity provider. "Expires"
+        is the longest a session can last; one left idle ends sooner.
+      </p>
+      <table class="data-table">
+        <tr>
+          <th>Address</th><th>Started</th><th>Last used</th><th>Expires</th><th></th>
+        </tr>
+        <tr *ngFor="let session of sessions">
+          <td>
+            {{session.ip.isEmpty ? 'unknown' : session.ip}}
+            <span class="current" *ngIf="isCurrentSession(session)">· this browser</span>
+            <div class="muted" *ngIf="session.previousIps.isNotEmpty">
+              also seen from {{session.previousIps.join(', ')}}
+            </div>
+          </td>
+          <td>{{formatDate(session.createdAt)}}</td>
+          <td>{{formatDate(session.lastSeenAt)}}</td>
+          <td>{{formatDate(session.expiresAt)}}</td>
+          <td class="actions">
+            <button
+              class="btn -small"
+              [class.-danger]="!isCurrentSession(session)"
+              [class.-quiet]="isCurrentSession(session)"
+              [disabled]="busy"
+              (click)="endSession(session)">
+              {{isCurrentSession(session) ? 'Sign out' : 'End'}}
+            </button>
+          </td>
+        </tr>
+      </table>
+    </section>
+
+  </div>
+</div>

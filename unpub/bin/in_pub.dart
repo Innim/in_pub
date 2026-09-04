@@ -5,6 +5,7 @@ import 'package:logging/logging.dart';
 import 'package:mongo_dart/mongo_dart.dart';
 import 'package:yaml/yaml.dart';
 import 'package:in_pub/in_pub.dart' as in_pub;
+import 'package:in_pub/src/shutdown.dart';
 import 'package:in_pub/src/utils.dart';
 
 main(List<String> args) async {
@@ -14,6 +15,11 @@ main(List<String> args) async {
   parser.addOption('database',
       abbr: 'd', defaultsTo: 'mongodb://localhost:27017/dart_pub');
   parser.addOption('proxy-origin', abbr: 'o', defaultsTo: '');
+  parser.addOption('googleapis-proxy',
+      defaultsTo: '',
+      help: 'http(s) proxy to reach googleapis through when checking a\n'
+          'Google credential. Only needed where this server cannot open\n'
+          'outbound connections directly.');
   parser.addOption('dart-executable',
       help: 'Dart SDK executable used to generate API documentation.',
       defaultsTo: 'dart');
@@ -49,11 +55,20 @@ main(List<String> args) async {
   final authConfig = _authConfigFrom(results);
   final authErrors = authConfig.validate();
   if (authErrors.isNotEmpty) {
-    print('Authentication is enabled but misconfigured:');
+    print('Authentication is misconfigured:');
     for (final error in authErrors) {
       print('  - $error');
     }
     exit(1);
+  }
+
+  // Publishing has to keep working with authentication switched off, and
+  // this is the only credential that does so. Turning both off leaves no way
+  // to publish at all — said here, alongside the other checks, because a
+  // database that will not open would otherwise swallow it.
+  if (!authConfig.enabled && !(results['google-auth'] as bool)) {
+    print('Warning: --no-google-auth without --auth leaves no way to '
+        'authenticate a publish. Every upload will be refused.');
   }
 
   final verbose = results['verbose'] as bool;
@@ -91,27 +106,83 @@ main(List<String> args) async {
 
   final baseDir = path.absolute('unpub-packages');
 
+  final googleAuth = results['google-auth'] as bool;
+  final googleapisProxy = (results['googleapis-proxy'] as String).trim();
+  final metaStore = in_pub.MongoStore(db);
+
   final auth = authConfig.enabled
       ? in_pub.AuthService(
           config: authConfig,
           store: in_pub.MongoAuthStore(db),
+          // Lets the token screen refuse an address that already publishes
+          // packages here, including publishers from before authentication
+          // existed who have no account record to find.
+          //
+          // Matched without regard to case, unlike `queryPackages(uploader:)`,
+          // which is an exact array match: the check exists to stop one
+          // address being handed to two parties, and `Alice@example.org`
+          // against a stored `alice@example.org` is one address.
+          isPackageUploader: (email) async =>
+              await db.collection(in_pub.packageCollection).count({
+                'uploaders': {
+                  r'$elemMatch': {
+                    // The shared pattern, not a fourth hand-written copy of
+                    // it. The three places that decide whether two addresses
+                    // are the same one disagreed: this one did not trim, so
+                    // an uploader entry with a stray space slipped past here
+                    // and was then matched by `App`, which does trim —
+                    // handing the token exactly the package it was meant to
+                    // be kept away from.
+                    r'$regex': in_pub.storedAddressPattern(email),
+                    r'$options': 'i',
+                  }
+                }
+              }) >
+              0,
+          // Publishing with the original Google credential keeps working
+          // through the gate, so enabling authentication does not strand
+          // publishers who have not moved to a token yet.
+          googleAuth: googleAuth,
+          googleapisProxy: googleapisProxy.isEmpty ? null : googleapisProxy,
         )
       : null;
 
   final app = in_pub.App(
-      metaStore: in_pub.MongoStore(db),
+      metaStore: metaStore,
       packageStore: in_pub.FileStore(baseDir),
       docStore: docsEnabled
           ? in_pub.DocStore(path.absolute('unpub-docs'),
               dartExecutable: dartExecutable)
           : null,
       auth: auth,
+      googleAuth: googleAuth,
+      googleapisProxy: googleapisProxy.isEmpty ? null : googleapisProxy,
       version: version,
       proxy_origin:
           proxy_origin.trim().isEmpty ? null : Uri.parse(proxy_origin));
 
   final server = await app.serve(host, port);
   print('Serving at http://${server.address.host}:${server.port}');
+
+  // Both hold things worth releasing — the revalidation timer, the OIDC and
+  // googleapis http clients — and until now the only in-tree caller left
+  // them armed and open at exit, so the shutdown path was never exercised.
+  ShutdownHandler(
+    // Bounded: an upload or a documentation build in flight would otherwise
+    // hold the drain open until the orchestrator resorted to SIGKILL, and a
+    // plain `close()` cannot be interrupted by pressing Ctrl-C again.
+    // Whatever has not finished by then is dropped.
+    drain: () => server.close().timeout(const Duration(seconds: 10),
+        onTimeout: () async {
+      print('Requests still in flight after 10s; closing anyway.');
+      await server.close(force: true);
+    }),
+    release: () {
+      auth?.close();
+      app.close();
+    },
+    closeDatabase: () => db.close(),
+  ).install();
 }
 
 void _addAuthOptions(ArgParser parser) {
@@ -182,6 +253,11 @@ void _addAuthOptions(ArgParser parser) {
       help: 'Consecutive failed re-checks after which a user is refused,\n'
           'whichever comes first with --auth-revalidate-hard.',
       defaultsTo: '3');
+  parser.addOption('auth-token-retention',
+      help: 'How long an expired or revoked token is kept before the sweep\n'
+          'drops it. Until then whoever presents one is told which of the\n'
+          'two it was, rather than that it is simply unknown.',
+      defaultsTo: '30d');
   parser.addFlag('auth-rp-logout',
       help: 'On sign-out, also sign the user out of the identity provider.',
       defaultsTo: false);
@@ -189,21 +265,59 @@ void _addAuthOptions(ArgParser parser) {
       help: 'Drop the Secure attribute on cookies so the flow works over\n'
           'plain http. Local development only.',
       defaultsTo: false);
+  parser.addOption('auth-dev-origins',
+      help: 'Comma-separated origins allowed to read the JSON endpoints\n'
+          'cross-origin, on top of --auth-public-url. Each one is\n'
+          'credentialed access to whatever a visitor\'s cookies open, so\n'
+          'this is for a development tool on another port and nothing\n'
+          'else. Example: http://localhost:8080');
   parser.addFlag('auth-public-badges',
-      help: 'Keep /badge and /logo reachable without signing in.',
+      help: 'Keep /badge reachable without signing in. Defaults to\n'
+          'on, but to off under --auth-protect-pub-api: a badge answers\n'
+          'differently for a package that exists, so leaving them open hands\n'
+          'out the private names and their latest versions.',
+      defaultsTo: null);
+  parser.addFlag('auth-protect-pub-api',
+      help: 'Require a token for `dart pub get` as well: package metadata\n'
+          'and tarballs stop being readable without one. Off by default,\n'
+          'because turning it on breaks every consumer that has not yet run\n'
+          '`dart pub token add`.',
+      defaultsTo: false);
+  parser.addFlag('google-auth',
+      help: 'Keep accepting the original Google credential for publishing,\n'
+          'as issued by the unpub_auth tool. On by default; turn it off once\n'
+          'everyone publishes with a token from this server.',
       defaultsTo: true);
 }
 
 in_pub.AuthConfig _authConfigFrom(ArgResults results) {
-  if (results['auth'] != true) return in_pub.AuthConfig.disabled();
+  if (results['auth'] != true) {
+    return in_pub.AuthConfig.disabled(
+        protectPubApi: results['auth-protect-pub-api'] as bool,
+        // Carried through rather than dropped: `--no-auth-public-badges`
+        // without `--auth` used to be discarded here, so badges went on
+        // being served to everyone while the operator believed they were
+        // closed. `validate` refuses to start on it instead.
+        publicBadges: results['auth-public-badges'] as bool?,
+        // Carried through for the same reason, though the flag is the loose
+        // one rather than the strict: an origin named here is never
+        // consulted without `--auth`, so a misspelled one is never reported,
+        // and README's "an entry that is not an origin stops the server" was
+        // true only half the time.
+        devOrigins: _csv(results['auth-dev-origins'] as String?));
+  }
 
   final env = Platform.environment;
   final secretValue = (results['auth-session-secret'] as String?) ??
       env['INPUB_AUTH_SESSION_SECRET'];
   if (secretValue == null || secretValue.trim().isEmpty) {
     print('Warning: no session secret configured. A random one is generated '
-        'for this run, so every session ends when the server restarts. Set '
-        'INPUB_AUTH_SESSION_SECRET to keep sessions across restarts.');
+        'for this run, so every session ends when the server restarts — and '
+        'so does every access token: the stored refresh tokens are encrypted '
+        'with that secret, so after a restart no account can be re-checked, '
+        'each is marked "must sign in again", and their tokens stop '
+        'authenticating until the owner signs in through a browser. That '
+        'will break CI. Set INPUB_AUTH_SESSION_SECRET to a fixed value.');
   }
 
   final publicUrl = (results['auth-public-url'] as String?) ?? '';
@@ -247,9 +361,14 @@ in_pub.AuthConfig _authConfigFrom(ArgResults results) {
     revalidateMaxFailures: int.tryParse(
             (results['auth-revalidate-max-failures'] as String?) ?? '') ??
         3,
+    tokenRetention: _duration(
+        results['auth-token-retention'] as String?, 'auth-token-retention'),
     rpInitiatedLogout: results['auth-rp-logout'] as bool,
     insecureCookie: results['auth-insecure-cookie'] as bool,
-    publicBadges: results['auth-public-badges'] as bool,
+    devOrigins: _csv(results['auth-dev-origins'] as String?),
+    // Left null when unstated, so the config derives it.
+    publicBadges: results['auth-public-badges'] as bool?,
+    protectPubApi: results['auth-protect-pub-api'] as bool,
   );
 }
 

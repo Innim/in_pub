@@ -663,7 +663,8 @@ String content(Map<String, String> vars) => """<!DOCTYPE html>
         margin: 0;
         position: inherit;
       }
-      .detail-tabs-header > .tab-button.-active {
+      .detail-tabs-header > .tab-button.-active,
+      .detail-tabs-header > .tab-link.-active > a {
         color: #000;
         border-bottom-color: #000;
       }
@@ -1307,6 +1308,107 @@ String content(Map<String, String> vars) => """<!DOCTYPE html>
       .markdown-body .hash-header:hover .hash-link {
         opacity: 1;
       }
+
+      /* Buttons.
+         Note the `mdc-button` rules above: they set a background and nothing
+         else, because they were written for a page that also loaded the
+         Material Components stylesheet. This application does not, so those
+         classes on their own give black text on dark blue at no height at
+         all. Use these instead. */
+      .btn {
+        font: inherit;
+        font-size: 14px;
+        line-height: 1.2;
+        /* Matches the inputs it sits beside: same font size and vertical
+           padding, plus a transparent border standing in for theirs, so the
+           two line up. */
+        padding: 7px 18px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: #0175c2;
+        color: #fff;
+        cursor: pointer;
+      }
+      .btn:hover:not(:disabled) {
+        background: #01568f;
+      }
+      .btn:disabled {
+        background: #b6c6d4;
+        cursor: default;
+      }
+      .btn.-danger {
+        background: #ff4242;
+      }
+      .btn.-danger:hover:not(:disabled) {
+        background: #ff0f0f;
+      }
+      .btn.-quiet {
+        background: #e8e8ed;
+        color: #1d1d1f;
+      }
+      .btn.-quiet:hover:not(:disabled) {
+        background: #d8d8de;
+      }
+      .btn.-small {
+        font-size: 13px;
+        padding: 5px 12px;
+      }
+
+      /* Present for a screen reader, absent for everyone else — for controls
+         that show only an icon. */
+      .sr {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+
+      /* Tables on the account and administration screens. */
+      .data-table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 13px;
+        margin-bottom: 16px;
+      }
+      .data-table th,
+      .data-table td {
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid #ececf0;
+        vertical-align: middle;
+      }
+      .data-table th {
+        color: #6e6e73;
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+      }
+      .data-table td.actions {
+        text-align: right;
+        white-space: nowrap;
+      }
+      .data-table td.actions > .btn {
+        margin-left: 6px;
+      }
+      .muted {
+        color: #86868b;
+        font-size: 12px;
+      }
+      .tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 20px;
+        font-size: 11px;
+        background: #e8f5e9;
+        color: #256029;
+      }
+      .tag.-bad {
+        background: #fdecea;
+        color: #b3261e;
+      }
     </style>
     <style>
       .markdown-body {
@@ -1709,7 +1811,7 @@ String content(Map<String, String> vars) => """<!DOCTYPE html>
       }
     </style>
     <link rel="icon" type="image/png" href="https://pub.dev/favicon.ico" />
-    <script defer src="main.dart.js"></script>
+    <script defer src="main.dart.js?v=${vars['BUNDLE_VERSION'] ?? ''}"></script>
   </head>
   <body>
     <my-app>Loading...</my-app>
