@@ -1,0 +1,27 @@
+/* Buttons, tabs and the container come from the shared stylesheet; only the
+   table and its badges are specific to this screen. */
+.admin {
+  margin: 24px 0 60px;
+}
+
+.title {
+  font-size: 24px;
+  margin: 0 0 12px;
+}
+
+.hint {
+  color: #555;
+  font-size: 14px;
+  max-width: 75ch;
+}
+
+.error {
+  color: #c62828;
+  font-weight: 500;
+}
+
+/* A link styled as a button still needs to sit like text does. */
+a.btn {
+  display: inline-block;
+  text-decoration: none;
+}

@@ -42,12 +42,13 @@ class AppComponent implements OnInit {
     if (appService.keyword == '') {
       return html.window.alert('keyword empty');
     }
-    var result = await _router.navigate(RoutePaths.list.toUrl(),
+    await _router.navigate(RoutePaths.list.toUrl(),
         NavigationParams(queryParameters: {'q': appService.keyword}));
-    // print(result);
   }
 
   String get homeUrl => RoutePaths.home.toUrl();
+  String get accountUrl => RoutePaths.account.toUrl();
+  String get adminUrl => RoutePaths.admin.toUrl();
   bool get loading => appService.loading;
 
   String get version =>

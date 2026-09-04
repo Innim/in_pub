@@ -3,6 +3,8 @@ import 'package:ngrouter/angular_router.dart';
 import 'home_component.template.dart' as home_template;
 import 'list_component.template.dart' as list_template;
 import 'detail_component.template.dart' as detail_template;
+import 'account_component.template.dart' as account_template;
+import 'admin_component.template.dart' as admin_template;
 // import 'not_found_component.template.dart' as not_found_template;
 
 class RoutePaths {
@@ -11,6 +13,8 @@ class RoutePaths {
   static final detail = RoutePath(path: 'packages/:name');
   static final detailVersion =
       RoutePath(path: 'packages/:name/versions/:version');
+  static final account = RoutePath(path: 'account');
+  static final admin = RoutePath(path: 'admin');
 }
 
 class Routes {
@@ -31,8 +35,20 @@ class Routes {
     component: detail_template.DetailComponentNgFactory,
   );
 
+  static final account = RouteDefinition(
+    routePath: RoutePaths.account,
+    component: account_template.AccountComponentNgFactory,
+  );
+
+  static final admin = RouteDefinition(
+    routePath: RoutePaths.admin,
+    component: admin_template.AdminComponentNgFactory,
+  );
+
   static final all = <RouteDefinition>[
     home,
+    account,
+    admin,
     list,
     detailVersion,
     detail,

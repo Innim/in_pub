@@ -1,5 +1,19 @@
 # unpub_auth
 
+> **Legacy.** The current way to authenticate against an `in_pub` server is to
+> run it with `--auth` and manage access tokens from its web interface: sign
+> in, open **Tokens**, create one, and run the `dart pub token add` command it
+> shows you. Those tokens work for both `dart pub get` and `dart pub publish`,
+> can be revoked from the same page, and stop working on their own once the
+> account behind them is disabled. See
+> [Sign-in required](https://github.com/Innim/in_pub#sign-in-required).
+>
+> `unpub_auth` remains for the older arrangement: uploading with a Google
+> credential. That still works — including against a server running without
+> `--auth` at all, which is the case this tool was written for — and the
+> server keeps accepting it until started with `--no-google-auth`. Nothing has
+> to be migrated in a hurry, but new setups should use the tokens instead.
+
 Only for Dart 2.15 and later.
 
 Since Dart 2.15:

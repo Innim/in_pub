@@ -83,6 +83,15 @@ class SessionManager {
 
   bool get _secureCookies => !config.insecureCookie;
 
+  /// The provider id token held for [session], decrypted, or null when
+  /// there is none or it no longer opens — which is what a rotated signing
+  /// secret leaves behind. A missing hint only makes the provider ask the
+  /// user to confirm the sign-out, so it is not worth failing over.
+  String? idTokenOf(StoredSession session) {
+    var stored = session.idToken;
+    return stored == null ? null : crypto.decrypt(stored);
+  }
+
   /// Starts a session for [user] and returns the cookie to set.
   Future<String> create(
     shelf.Request req,
@@ -105,7 +114,8 @@ class SessionManager {
       createdAt: now,
       lastSeenAt: now,
       expiresAt: now.add(config.sessionTtl),
-      idToken: idToken,
+      // Encrypted at rest, like the refresh token beside it.
+      idToken: idToken == null ? null : crypto.encrypt(idToken),
     ));
 
     return _cookie('$id.$secret', maxAge: config.sessionTtl);
@@ -141,6 +151,16 @@ class SessionManager {
       // blocked person to sign in again only sends them round the provider
       // to be refused at the far end.
       var owner = await store.getUser(session.userId);
+      if (owner != null && owner.needsSignIn) {
+        // Not a denial: this server has run out of ways to re-check the
+        // account, and a fresh sign-in is exactly what restores them.
+        // Reporting it as denied sent people to a page that told them an
+        // administrator had withdrawn their access, with no link to the one
+        // thing that would have fixed it.
+        return SessionResult(SessionOutcome.revoked,
+            cookies: [_deleteCookie()],
+            message: owner.blockedReason ?? session.revokedReason);
+      }
       if (owner != null && !owner.isActive) {
         return SessionResult(SessionOutcome.denied,
             cookies: [_deleteCookie()],
@@ -155,8 +175,24 @@ class SessionManager {
       return SessionResult(SessionOutcome.expired, cookies: [_deleteCookie()]);
     }
 
+    // A live row with no secret on it is not a cookie somebody copied — it is
+    // a document nothing can ever match, which is what a write that failed
+    // half way or a field lost in a migration leaves behind. Told apart here
+    // because the alternative is the clone path: with
+    // `--auth-reuse-kills-all` one such document signs its owner out of every
+    // browser they have open and tells them their session was used from more
+    // than one place. Ended, so it stops being offered on the account screen
+    // and re-checked by every sweep, and answered as `invalid`, which asks
+    // for the sign-in that replaces it.
+    if (session.secretHash.isEmpty) {
+      _log.severe('session ${session.id} for ${session.userId} has no stored '
+          'secret; ending it as unusable rather than reporting a clone');
+      await store.revokeSession(session.id, 'the stored session was unusable');
+      return SessionResult(SessionOutcome.invalid, cookies: [_deleteCookie()]);
+    }
+
     var presented = CryptoBox.hash(secret);
-    var matchesCurrent = session.secretHash.isNotEmpty &&
+    var matchesCurrent =
         CryptoBox.constantTimeEquals(presented, session.secretHash);
     var previous = session.prevSecretHash;
     var matchesPrevious = !matchesCurrent &&
@@ -175,6 +211,15 @@ class SessionManager {
       if (session.currentSecretSeen) {
         // Somebody already used the new secret, so this request is a second
         // client working from a stale copy of the cookie.
+        //
+        // A request that was already in flight when the rotation happened
+        // lands here too, and is signed out with it. Tolerating a window
+        // instead was tried and reverted: `rotationGrace` is ten minutes,
+        // and even a short overlap is time in which a stolen cookie works
+        // undetected after every rotation. Detecting the theft is the point
+        // of this check, and the race needs the straggler to outlive a whole
+        // round trip — a slow tarball or documentation fetch issued moments
+        // before the rotation.
         return _handleClone(
             session, req, 'session was used from two different clients');
       }
@@ -185,15 +230,18 @@ class SessionManager {
       }
     }
 
-    // A cookie that travelled to another browser is not this session.
+    // A cookie presented by a different client is not this session. Ended,
+    // but not reported as theft: a browser that updates itself overnight
+    // changes its `User-Agent`, and calling that a stolen cookie showed the
+    // owner an alarming message and — with `--auth-reuse-kills-all` — killed
+    // their sessions everywhere else too. Signing in again is the answer,
+    // and `invalid` is what asks for that.
     var uaHash = CryptoBox.hash(req.headers['user-agent'] ?? '');
     if (session.uaHash.isNotEmpty &&
         !CryptoBox.constantTimeEquals(uaHash, session.uaHash)) {
-      return _handleClone(
-          session,
-          req,
-          'session was used from a different '
-          'client application');
+      await store.revokeSession(
+          session.id, 'presented by a different client application');
+      return SessionResult(SessionOutcome.invalid, cookies: [_deleteCookie()]);
     }
 
     var ip = clientIp(req, config.trustedProxies);
@@ -213,8 +261,29 @@ class SessionManager {
 
     var validation = await validator.ensureValid(user);
     if (!validation.isAllowed) {
+      return SessionResult(
+          validation.recoverable
+              ? SessionOutcome.revoked
+              : SessionOutcome.denied,
+          cookies: [_deleteCookie()],
+          message: validation.reason);
+    }
+    // Checked here as well as during revalidation, so that tightening the
+    // allowed groups takes effect on the next request rather than whenever
+    // the sweep next runs — which is what a token is already held to.
+    if (!config.isAllowedGroup(validation.user!.groups)) {
+      // Ended, not merely refused. Only this server's configuration
+      // changed, so the account is still active and the provider still
+      // vouches for it: nothing else would ever clear the row. It would stay
+      // "live" for the whole idle window — counted on the administration
+      // screen, offered an End button, and re-checked against the provider
+      // every few minutes — for somebody who cannot make a single request.
+      await store.revokeSession(
+          session.id, 'no longer in a group with access to this server');
       return SessionResult(SessionOutcome.denied,
-          cookies: [_deleteCookie()], message: validation.reason);
+          cookies: [_deleteCookie()],
+          message: 'your account is not a member of a group with access to '
+              'this server');
     }
 
     var cookies = <String>[];

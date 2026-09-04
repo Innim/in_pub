@@ -5,9 +5,6 @@ import 'package:collection/collection.dart' show IterableExtension;
 import 'package:crypto/crypto.dart' show sha1;
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
-import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart';
-import 'package:googleapis/oauth2/v2.dart';
 import 'package:mime/mime.dart';
 import 'package:http_parser/http_parser.dart';
 import 'package:shelf_cors_headers/shelf_cors_headers.dart';
@@ -20,7 +17,12 @@ import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
 import 'package:in_pub/src/doc_store.dart';
 import 'package:in_pub/src/doc_progress_page.dart';
+import 'package:in_pub/src/auth/auth_middleware.dart';
+import 'package:in_pub/src/auth/http_helpers.dart';
+import 'package:in_pub/src/auth/identity.dart';
+import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/auth_service.dart';
+import 'package:in_pub/src/auth/google_credential.dart';
 import 'package:path/path.dart' as p;
 import 'utils.dart';
 import 'auth_exception.dart';
@@ -28,6 +30,13 @@ import 'static/index.html.dart' as index_html;
 import 'static/main.dart.js.dart' as main_dart_js;
 
 part 'app.g.dart';
+
+/// Client-side routes that only mean anything once `--auth` is on.
+///
+/// Named so the test that walks the shell routes reads the same list the
+/// server does; the `@Route.get` annotations on [App.indexHtml] still have
+/// to be kept in step by hand, because they are compiled into the router.
+const authOnlyRoutes = {'/account', '/admin'};
 
 class App {
   static const proxyOriginHeader = "proxy-origin";
@@ -51,6 +60,13 @@ class App {
 
   /// http(s) proxy to call googleapis (to get uploader email)
   final String? googleapisProxy;
+
+  /// Whether a Google credential is still accepted for publishing.
+  ///
+  /// On by default, because it is how publishing has always worked here and
+  /// switching it off strands every existing publisher until they have a
+  /// token from this server.
+  final bool googleAuth;
   final String? overrideUploaderEmail;
 
   /// A forward proxy uri
@@ -71,20 +87,48 @@ class App {
     this.auth,
     this.upstream = 'https://pub.dev',
     this.googleapisProxy,
+    this.googleAuth = true,
     this.overrideUploaderEmail,
     this.uploadValidator,
     this.proxy_origin,
     this.version = '',
   });
 
+  /// Whether [resolveGoogleBearer] has anything to do.
+  ///
+  /// Only with authentication off. With it on, every credential goes through
+  /// the gate and `AuthService.legacyResolver` is the one that answers —
+  /// [googleAuth] here applies to nothing. Asking whether *that* resolver
+  /// exists, as this used to, made the condition true precisely when this
+  /// path is unreachable, and building [_resolver] under it allocated a
+  /// second HTTP client and a second answer cache for a question the auth
+  /// layer had already answered.
+  bool get _legacyEnabled => auth == null && googleAuth;
+
+  /// A JSON answer.
+  ///
+  /// Deliberately without an `Access-Control-Allow-Origin` of its own: the
+  /// CORS middleware decides that, and a wildcard set here replaces its
+  /// answer — `shelf_cors_headers` lets the response's own headers win — so
+  /// the origin restriction would never reach the endpoints that carry
+  /// package data.
   static shelf.Response _okWithJson(Map<String, dynamic> data) =>
       shelf.Response.ok(
         json.encode(data),
-        headers: {
-          HttpHeaders.contentTypeHeader: ContentType.json.mimeType,
-          'Access-Control-Allow-Origin': '*'
-        },
+        headers: {HttpHeaders.contentTypeHeader: _jsonContentType},
       );
+
+  /// `application/json` with the encoding spelled out.
+  ///
+  /// `ContentType.json.mimeType` drops the charset that `ContentType.json`
+  /// itself carries. Nothing was broken by that — shelf puts it back when
+  /// the body is a string, which every answer here is — but the guarantee
+  /// then lives in shelf rather than in this file, and a body handed over as
+  /// bytes would silently lose it. What is at stake is not decoration:
+  /// `package:http`, which the web UI fetches with, reads a body with no
+  /// stated charset as latin1, and every README and description this server
+  /// answers with is text somebody wrote.
+  static const _jsonContentType = 'application/json; charset=utf-8';
 
   static shelf.Response _successMessage(String message) => _okWithJson({
         'success': {'message': message}
@@ -94,36 +138,16 @@ class App {
           {int status = HttpStatus.badRequest}) =>
       shelf.Response(
         status,
-        headers: {HttpHeaders.contentTypeHeader: ContentType.json.mimeType},
+        headers: {HttpHeaders.contentTypeHeader: _jsonContentType},
         body: json.encode({
           'error': {'message': message}
         }),
       );
 
-  /// 401 for the pub client.
-  ///
-  /// `dart pub` prints the `message` parameter of the `WWW-Authenticate`
-  /// header back to the user, so it is the one place where a hint about how
-  /// to authenticate actually reaches them.
-  static shelf.Response _unauthorized(String message) => shelf.Response(
-        HttpStatus.unauthorized,
-        headers: {
-          HttpHeaders.contentTypeHeader: ContentType.json.mimeType,
-          HttpHeaders.wwwAuthenticateHeader:
-              'Bearer realm="pub", message="${_quoteHeaderValue(message)}"',
-        },
-        body: json.encode({
-          'error': {'message': message}
-        }),
-      );
-
-  /// Makes [value] safe to place inside a quoted HTTP header parameter.
-  static String _quoteHeaderValue(String value) => value
-      .replaceAll('\\', r'\\')
-      .replaceAll('"', r'\"')
-      .replaceAll(RegExp(r'[\r\n]+'), ' ');
-
-  http.Client? _googleapisClient;
+  /// 401 for the pub client. Shared with the gate, so a caller sees the same
+  /// shape whichever of the two refused it.
+  static shelf.Response _unauthorized(String message) =>
+      pubUnauthorized(message);
 
   String _resolveUrl(shelf.Request req, String reference) {
     if (proxy_origin != null) {
@@ -136,37 +160,233 @@ class App {
     return req.requestedUri.resolve(reference).toString();
   }
 
-  Future<String> _getUploaderEmail(shelf.Request req) async {
-    if (overrideUploaderEmail != null) return overrideUploaderEmail!;
+  /// The identity to record against a publish, and to check against a
+  /// package's uploader list.
+  ///
+  /// Resolution order: whatever the gate already established for this
+  /// request, then one of this server's own tokens, then — while
+  /// [googleAuth] is on — the original Google credential, so deployments
+  /// that publish with `unpub_auth` today keep working until they migrate.
+  Future<String> _getUploaderEmail(shelf.Request req) async =>
+      (await _resolvePublisher(req)).email;
+
+  /// Whether [email] is on [uploaders], compared the way addresses compare.
+  ///
+  /// A literal `List.contains` made the answer depend on how somebody typed
+  /// their address: an identity provider reporting `Alice@Example.org`
+  /// against a list holding `alice@example.org` — the form Google returns,
+  /// and so the form every legacy publish recorded — is the same person, and
+  /// refusing them said only that they were "not an uploader".
+  /// An absent list is not a permission. Nobody is recorded as owning such
+  /// a package, and reading that as "no objection" let any caller who could
+  /// authenticate at all add themselves as an uploader of it, or delete its
+  /// versions. It stays frozen until the record is repaired.
+  static bool _isUploader(List<String>? uploaders, String email) =>
+      _storedUploader(uploaders, email) != null;
+
+  /// The entry in [uploaders] that stands for [email], as it is actually
+  /// stored, or null if there is none.
+  ///
+  /// The one place address equality is decided, so the guard and the
+  /// mutation cannot come to disagree — which is the bug that made a
+  /// case-mismatched removal report success and remove nothing.
+  static String? _storedUploader(List<String>? uploaders, String email) =>
+      _storedUploaders(uploaders, email).firstOrNull;
+
+  /// Every entry in [uploaders] that stands for [email], as they are actually
+  /// stored.
+  ///
+  /// There can be more than one. `addVersion` adds the uploader with
+  /// `addToSet`, which compares literally, so before the write path started
+  /// recording the spelling already on file a publish as `Alice@Example.org`
+  /// to a list holding `alice@example.org` appended a second entry for the
+  /// same person. Removal has to take them all: pulling only the first left
+  /// Alice publishing while `dart pub uploader remove` printed success.
+  static List<String> _storedUploaders(List<String>? uploaders, String email) {
+    if (uploaders == null) return const [];
+    var wanted = normalizeAddress(email);
+    return uploaders.where((u) => normalizeAddress(u) == wanted).toList();
+  }
+
+  /// Who is publishing, and whether this server knows them.
+  ///
+  /// `provisional` means the credential was accepted but answers to no
+  /// account here — only the legacy Google credential can be that. It may
+  /// still publish to a package whose uploader list already names it; what
+  /// it may not do is create a new one. See [upload].
+  Future<({String email, bool provisional})> _resolvePublisher(
+      shelf.Request req) async {
+    if (overrideUploaderEmail != null) {
+      return (email: overrideUploaderEmail!, provisional: false);
+    }
+
+    // Already resolved by the gate on the way in; no reason to spend a second
+    // round trip proving the same credential.
+    var alreadyResolved = bearerUserOf(req);
+    if (alreadyResolved != null) {
+      return (
+        email: alreadyResolved.email,
+        provisional: bearerIsProvisionalIn(req)
+      );
+    }
 
     var authHeader = req.headers[HttpHeaders.authorizationHeader];
     if (authHeader == null) throw AuthException('missing authorization header');
 
     var token = authHeader.split(' ').last;
 
-    if (_googleapisClient == null) {
-      if (googleapisProxy != null) {
-        _googleapisClient = IOClient(HttpClient()
-          ..findProxy = (url) => HttpClient.findProxyFromEnvironment(url,
-              environment: {"https_proxy": googleapisProxy!}));
-      } else {
-        _googleapisClient = http.Client();
+    var authService = auth;
+    if (authService != null) {
+      // Delegated rather than repeated: `resolveBearer` is the one place
+      // that sequences our tokens and the legacy credential, and a second
+      // copy of that ordering here would drift from it.
+      var result = await authService.resolveBearer(token,
+          ip: clientIp(req, authService.config.trustedProxies),
+          // The same predicate the gate uses, not a second copy of the
+          // rule. The gate steps aside entirely when
+          // `--auth-protect-pub-api` is off, which is the default, so this
+          // path has to carry the rule too — and when the two were written
+          // out separately one of them grew a `googleAuth` conjunct the
+          // other lacked.
+          allowLegacy: authService.legacyAllowedFor(req.requestedUri.path));
+      var user = result.user;
+      if (user != null) {
+        return (email: user.email, provisional: result.provisional);
       }
+      throw AuthException(
+          result.message ?? 'this credential is not recognised by this server');
     }
 
-    var info =
-        await Oauth2Api(_googleapisClient!).tokeninfo(accessToken: token);
-    if (info.email == null)
-      throw AuthException('fail to get google account email');
-    return info.email!;
+    // Authentication is switched off, so the legacy credential is the only
+    // scheme there is — and publishing has always worked this way.
+    String? email;
+    try {
+      email = await resolveGoogleBearer(token);
+    } on IdentityUnavailableException catch (e) {
+      // Not a refusal. Letting this escape turned a Google outage into a
+      // malformed-upload error on one route and a 500 on three others.
+      throw AuthException(e.message);
+    }
+    if (email == null) {
+      throw AuthException('this credential is not recognised by this server');
+    }
+    // Nothing to be provisional against: with authentication off there are no
+    // accounts, and publishing has always worked exactly this way.
+    return (email: email, provisional: false);
   }
+
+  /// Resolves the original Google credential, or null when it is switched
+  /// off or the token is not one.
+  ///
+  /// Only reachable with authentication off: with it on, the gate resolves
+  /// every credential, and this server's own tokens have to be tried first.
+  /// The work itself lives in [GoogleCredentialResolver], so both paths
+  /// share one cache policy and one idea of what a network failure means.
+  Future<String?> resolveGoogleBearer(String token) {
+    if (!_legacyEnabled) return Future.value(null);
+    return _resolver.resolve(token);
+  }
+
+  /// This server's own resolver, built on first use.
+  ///
+  /// Only ever reached with authentication off — with it on the gate
+  /// resolves every credential through [AuthService.legacyResolver], and
+  /// this is never consulted. An earlier version tried to borrow that one
+  /// here, which read as though the two could collide; they cannot.
+  GoogleCredentialResolver get _resolver =>
+      _ownResolver ??= GoogleCredentialResolver(proxy: googleapisProxy);
+
+  GoogleCredentialResolver? _ownResolver;
+
+  /// Releases what this server owns, for an embedder that builds and discards
+  /// [App]s. The auth layer's own resources go with [AuthService.close].
+  void close() => _ownResolver?.close();
+
+  /// Adds `Origin` to an answer's `Vary`, leaving one that already says so
+  /// alone.
+  ///
+  /// Merged rather than set: the gate lists `Authorization` and sometimes
+  /// `Cookie` as well, and overwriting that would tell a shared cache it may
+  /// serve one token holder's private metadata to the next.
+  static shelf.Handler _varyOnOrigin(shelf.Handler inner) =>
+      (shelf.Request req) async {
+        var response = await inner(req);
+        var stated = response.headers[HttpHeaders.varyHeader];
+        var fields =
+            (stated ?? '').split(',').map((f) => f.trim().toLowerCase());
+        if (fields.any((f) => f == 'origin' || f == '*')) return response;
+        return response.change(headers: {
+          HttpHeaders.varyHeader:
+              stated == null || stated.isEmpty ? 'Origin' : '$stated, Origin',
+        });
+      };
 
   Future<HttpServer> serve([String host = '0.0.0.0', int port = 4000]) async {
     var authService = auth;
     if (authService != null) await authService.start();
 
-    var pipeline = const shelf.Pipeline()
-        .addMiddleware(corsHeaders())
+    // `shelf_cors_headers` answers with the caller's own origin reflected
+    // back and `Access-Control-Allow-Credentials: true`. Left open, that
+    // lets any page a browser considers same-site — a sibling subdomain, a
+    // stale CNAME — read an authenticated response, including the
+    // anti-forgery token the account API hands out. Once there is a public
+    // url to compare against, only it is allowed.
+    var pipeline = shelf.Pipeline();
+    // Outermost, so it sees the finished answer and whatever `Vary` the gate
+    // already put on it. With `--auth` on the CORS answer is the caller's
+    // own origin reflected back, and `shelf_cors_headers` writes `Vary` only
+    // when it is handed a fixed `Access-Control-Allow-Origin` — which this
+    // branch is not, it supplies only the allowed request headers. So every
+    // answer left carrying an origin-specific `Access-Control-Allow-Origin`
+    // and nothing saying the answer depends on the origin. The gate stamps
+    // one on what it authenticates, but plenty leaves without passing
+    // through that: with `--auth-protect-pub-api` off — the default —
+    // `/api/packages/<name>` short-circuits and goes out with a reflected
+    // origin and `Allow-Credentials: true`, and `/` and `/main.dart.js` go
+    // out `no-cache` with an entity tag, which is an invitation to store
+    // them. A CDN or reverse proxy keying on the url alone then holds one
+    // origin's header and replays it to the next caller. The wildcard branch
+    // below needs none of this: `*` is the same answer for everybody.
+    if (authService != null) pipeline = pipeline.addMiddleware(_varyOnOrigin);
+    pipeline = pipeline
+        .addMiddleware(authService == null
+            // A wildcard, not the caller's origin reflected back. The
+            // default reflects it *and* sends
+            // `Access-Control-Allow-Credentials: true`, which lets any page
+            // read these endpoints from a visitor's browser with their
+            // cookies attached — a real exposure where a repository is
+            // fronted by an SSO proxy and that proxy's cookie is what grants
+            // access. `*` is what a browser refuses to combine with
+            // credentials, and it used to be set per-response until that was
+            // removed as redundant.
+            ? corsHeaders(headers: {
+                ACCESS_CONTROL_ALLOW_ORIGIN: '*',
+                ACCESS_CONTROL_ALLOW_CREDENTIALS: 'false',
+              })
+            // The public url's own origin, plus whatever
+            // `--auth-dev-origins` names. Both spelled out: this used to
+            // admit any localhost origin whenever `--auth-insecure-cookie`
+            // was set, which reads a CORS policy off a cookie attribute —
+            // an operator terminating TLS at a reverse proxy sets that flag
+            // for its documented reason and was thereby letting any page on
+            // any localhost port read `/auth/api/account` with the
+            // visitor's cookies. Listing an origin still does not make
+            // `make dev-web` able to exercise authentication: the browser
+            // client sends no cookies cross-origin, so those requests
+            // arrive unauthenticated whatever these headers say. README's
+            // "Trying it locally" is the accurate account.
+            : corsHeaders(
+                originChecker: authService.config.allowedOrigins.contains,
+                // The default list does not mention `x-csrf-token`, which
+                // every account and administration change carries, so such a
+                // request failed its preflight before leaving the page. A
+                // cross-origin caller that does send credentials
+                // deliberately needs it allowed.
+                headers: {
+                    ACCESS_CONTROL_ALLOW_HEADERS: 'accept,accept-encoding,'
+                        'authorization,content-type,dnt,origin,user-agent,'
+                        'x-csrf-token',
+                  }))
         .addMiddleware(shelf.logRequests());
     // The gate sits inside request logging so refusals are logged, and
     // outside the router so a route that does not exist cannot be probed
@@ -175,9 +395,12 @@ class App {
       pipeline = pipeline.addMiddleware(authService.gate);
 
     var handler = pipeline.addHandler((req) async {
+      // `/auth/` belongs to the auth router in its entirety, so its answer
+      // is final. Falling through on a 404 would discard a deliberate "no
+      // such token" — body and all — and replace it with the application
+      // router's own not-found.
       if (authService != null && req.requestedUri.path.startsWith('/auth/')) {
-        var authResponse = await authService.handler(req);
-        if (authResponse.statusCode != HttpStatus.notFound) return authResponse;
+        return authService.handler(req);
       }
       // Return 404 by default
       // https://github.com/google/dart-neats/issues/1
@@ -218,7 +441,9 @@ class App {
     return ua != null && ua.toLowerCase().contains('dart pub');
   }
 
-  Router get router => _$AppRouter(this);
+  /// Built once, for the same reason as the auth router: a getter rebuilt
+  /// the whole table on every request.
+  late final Router router = _$AppRouter(this);
 
   @Route.get('/api/packages/<name>')
   Future<shelf.Response> getVersions(shelf.Request req, String name) async {
@@ -351,7 +576,7 @@ class App {
     // without a metadata lookup.
     var docDir = docStore!.cachedDir(name, version);
     if (docDir != null) {
-      return _serveDocFile(docDir, file.isEmpty ? 'index.html' : file);
+      return _serveDocFile(req, docDir, file.isEmpty ? 'index.html' : file);
     }
 
     // A sub-resource requested before docs exist: nothing to serve yet.
@@ -375,11 +600,33 @@ class App {
     docStore!.startGeneration(name, version, () => _readTarball(name, version));
     return shelf.Response.ok(
       docProgressPage(name, version),
-      headers: {HttpHeaders.contentTypeHeader: ContentType.html.mimeType},
+      headers: {
+        HttpHeaders.contentTypeHeader: ContentType.html.mimeType,
+        // Stated here rather than left to whatever sits in front. This page
+        // stops being true the moment `dart doc` finishes — seconds — and it
+        // is served from the same url the finished documentation will be, so
+        // anything that keeps a copy shows a generated doc set as still
+        // generating. With `--auth` on the gate would mark it private and
+        // unstorable anyway; with `--auth` off nothing does, and a CDN in
+        // front is free to hold a plain 200 on its own terms.
+        HttpHeaders.cacheControlHeader: 'no-store',
+      },
     );
   }
 
-  Future<shelf.Response> _serveDocFile(Directory docDir, String file) async {
+  /// Serves one file out of a generated documentation set, with the
+  /// validator that makes the gate's `private, no-cache` mean something.
+  ///
+  /// `no-cache` is a promise to revalidate, not a refusal to store — but a
+  /// revalidation the server cannot answer with "unchanged" can only be
+  /// answered with the whole file again, which left the marking identical to
+  /// `no-store`: every stylesheet, script and search index in the set
+  /// re-downloaded on every click through the docs. A generated set is
+  /// written once and replaced wholesale rather than edited in place, so its
+  /// size and modification time identify a file as well as hashing the bytes
+  /// would, at the cost of the `stat` this needs anyway.
+  Future<shelf.Response> _serveDocFile(
+      shelf.Request req, Directory docDir, String file) async {
     // Resolve the requested file within the doc dir, guarding against
     // path traversal (`..`) escaping the cache.
     var target = p.normalize(p.join(docDir.path, file));
@@ -398,14 +645,77 @@ class App {
       return shelf.Response.notFound('Not Found');
     }
 
+    var stat = await f.stat();
+    // Truncated to the second: `Last-Modified` carries nothing finer, and
+    // comparing an untruncated time against the one we ourselves handed out
+    // makes the file look newer on every conditional request. `FileStat`
+    // reports whole seconds anyway on the platforms this runs on.
+    var modified = DateTime.fromMillisecondsSinceEpoch(
+        stat.modified.millisecondsSinceEpoch ~/ 1000 * 1000,
+        isUtc: true);
+    // Size and time, which is what nginx derives a tag from as well, rather
+    // than a hash of the bytes: hashing would mean reading every file on
+    // every conditional request, which is the download this exists to
+    // avoid. What it cannot tell apart is a doc set regenerated within the
+    // same second as the one before it, whose files come out at exactly the
+    // same length — a narrower window than the seconds `dart doc` spends
+    // producing them.
+    var etag = '"${stat.size.toRadixString(16)}-'
+        '${modified.millisecondsSinceEpoch.toRadixString(16)}"';
+    var validators = {
+      HttpHeaders.etagHeader: etag,
+      HttpHeaders.lastModifiedHeader: HttpDate.format(modified),
+    };
+
+    if (_docFileIsUnchanged(req, etag, modified)) {
+      return shelf.Response.notModified(headers: validators);
+    }
+
     return shelf.Response.ok(
       f.openRead(),
       headers: {
         HttpHeaders.contentTypeHeader:
             lookupMimeType(target) ?? 'application/octet-stream',
+        ...validators,
       },
     );
   }
+
+  /// Whether the caller already holds this exact file.
+  static bool _docFileIsUnchanged(
+      shelf.Request req, String etag, DateTime modified) {
+    var tags = req.headers[HttpHeaders.ifNoneMatchHeader];
+    if (tags != null) {
+      // The tag decides on its own when it is there: a browser that has the
+      // file sends both headers, and reading the date instead would answer
+      // with the whole body whenever a redeployment rewrote the set with the
+      // same contents.
+      return _ifNoneMatchHolds(tags, etag);
+    }
+    var since = req.headers[HttpHeaders.ifModifiedSinceHeader];
+    if (since == null) return false;
+    try {
+      return !modified.isAfter(HttpDate.parse(since));
+    } catch (_) {
+      // A date we cannot read says nothing about the file.
+      return false;
+    }
+  }
+
+  /// Whether an `If-None-Match` header claims [etag].
+  ///
+  /// RFC 9110 lets the header carry `*`, a comma-separated list, and weak
+  /// tags — and clients use all three: a caching proxy in front of this
+  /// server may weaken a tag on the way through, and a browser holding an
+  /// earlier and a current copy sends both. Compared as one opaque string,
+  /// none of those ever matched, so the answer to a revalidation was the
+  /// whole body again. Shared by the generated documentation and the
+  /// embedded assets, because a rule written out twice is one the two will
+  /// eventually disagree about.
+  static bool _ifNoneMatchHolds(String header, String etag) => header
+      .split(',')
+      .map((t) => t.trim())
+      .any((t) => t == '*' || t == etag || t == 'W/$etag');
 
   @Route.get('/api/packages/versions/new')
   Future<shelf.Response> getUploadUrl(shelf.Request req) async {
@@ -418,7 +728,8 @@ class App {
   @Route.post('/api/packages/versions/newUpload')
   Future<shelf.Response> upload(shelf.Request req) async {
     try {
-      var uploader = await _getUploaderEmail(req);
+      var publisher = await _resolvePublisher(req);
+      var uploader = publisher.email;
 
       var contentType = req.headers['content-type'];
       if (contentType == null) throw 'invalid content type';
@@ -469,15 +780,34 @@ class App {
       var pubspecYaml = utf8.decode(pubspecArchiveFile.content);
       var pubspec = loadYamlAsMap(pubspecYaml)!;
 
-      if (uploadValidator != null) {
-        await uploadValidator!(pubspec, uploader);
-      }
-
       // TODO: null
       var name = pubspec['name'] as String;
       var version = pubspec['version'] as String;
 
       var package = await metaStore.queryPackage(name);
+
+      // Before the embedder's hook, not after. A new package has no uploader
+      // list, so nothing else in this method bounds who may create one. That
+      // is fine when the credential answers to an account here, and not fine
+      // when it only proves the holder has a Google account: on a server
+      // whose owner has asked for authentication, anyone at all could
+      // otherwise fill the repository with packages. Publishing to a package
+      // that already exists is unaffected, which is what keeps publishers
+      // from before authentication existed working.
+      //
+      // The decision needs nothing the validator produces, and running the
+      // hook first meant a publish about to be refused still triggered
+      // whatever the host does there — audit rows, a policy call, a name
+      // reservation.
+      if (package == null && publisher.provisional) {
+        throw '$uploader has no account on this server, so it cannot create '
+            'the new package $name. Sign in through the web interface once, '
+            'or publish it with a token created there.';
+      }
+
+      if (uploadValidator != null) {
+        await uploadValidator!(pubspec, uploader);
+      }
 
       // Package already exists
       if (package != null) {
@@ -486,7 +816,7 @@ class App {
         }
 
         // Check uploaders
-        if (package.uploaders?.contains(uploader) == false) {
+        if (!_isUploader(package.uploaders, uploader)) {
           throw '$uploader is not an uploader of $name';
         }
 
@@ -510,6 +840,15 @@ class App {
         changelog = utf8.decode(changelogFile.content);
       }
 
+      // Recorded under the spelling the package already holds, where it has
+      // one. `addVersion` adds the uploader with `addToSet`, which compares
+      // literally — so publishing as `Alice@Example.org` to a list holding
+      // `alice@example.org` appended a second entry for the same person, and
+      // removing one of them afterwards left the other publishing. The
+      // permission check above already treats the two as equal; the write
+      // has to agree with it.
+      uploader = _storedUploader(package?.uploaders, uploader) ?? uploader;
+
       // Write package meta to database
       var unpubVersion = UnpubVersion(
         version,
@@ -528,8 +867,16 @@ class App {
     } on AuthException catch (e) {
       return _unauthorized(e.message);
     } catch (err) {
+      // Built as a query parameter rather than interpolated. The message
+      // carries the package name, which comes verbatim from the uploaded
+      // pubspec: `name: foo#x` made everything after the `#` a fragment, so
+      // the finish route saw no error at all and reported a refused publish
+      // as a success, and `name: foo&error=ok` rewrote the parameter.
       return shelf.Response.found(_resolveUrl(
-          req, '/api/packages/versions/newUploadFinish?error=$err'));
+          req,
+          Uri(
+              path: '/api/packages/versions/newUploadFinish',
+              queryParameters: {'error': '$err'}).toString()));
     }
   }
 
@@ -545,7 +892,24 @@ class App {
   @Route.post('/api/packages/<name>/uploaders')
   Future<shelf.Response> addUploader(shelf.Request req, String name) async {
     var body = await req.readAsString();
-    var email = Uri.splitQueryString(body)['email']!; // TODO: null
+    // Not `!`: a request without the field is a bad request, not a crash.
+    var email = Uri.splitQueryString(body)['email']?.trim() ?? '';
+    if (email.isEmpty) {
+      return _badRequest('email is required');
+    }
+    // The same rule the token side applies, from the same place. An uploader
+    // entry is an identity: `TokenService` refuses to issue a credential
+    // carrying anything that is not an address, so `alice` written here can
+    // never publish — and worse, `_checkServiceAddress` then reads it as a
+    // name that "already publishes packages here" and refuses to give a
+    // service token that address either. One typed word on this route locks
+    // a name out on both.
+    if (!looksLikeEmailAddress(email)) {
+      return _badRequest('"$email" is not an email address: an uploader is '
+          'recorded as the address it publishes under, so it has to be a '
+          'full one — an @ and a domain with a dot in it. A single-label '
+          'name like "ops@intranet" is refused for that reason');
+    }
     final String operatorEmail;
     try {
       operatorEmail = await _getUploaderEmail(req);
@@ -553,11 +917,17 @@ class App {
       return _unauthorized(e.message);
     }
     var package = await metaStore.queryPackage(name);
+    if (package == null) {
+      // Said plainly. The store's update matches no document, so answering
+      // "uploader added" reported a publish permission that was never
+      // granted — and `dart pub uploader add` printed success.
+      return _badRequest('package not found', status: HttpStatus.notFound);
+    }
 
-    if (package?.uploaders?.contains(operatorEmail) == false) {
+    if (!_isUploader(package.uploaders, operatorEmail)) {
       return _badRequest('no permission', status: HttpStatus.forbidden);
     }
-    if (package?.uploaders?.contains(email) == true) {
+    if (_isUploader(package.uploaders, email)) {
       return _badRequest('email already exists');
     }
 
@@ -568,7 +938,17 @@ class App {
   @Route.delete('/api/packages/<name>/uploaders/<email>')
   Future<shelf.Response> removeUploader(
       shelf.Request req, String name, String email) async {
-    email = Uri.decodeComponent(email);
+    try {
+      email = Uri.decodeComponent(email);
+    } on FormatException {
+      // Defensive rather than a fix for anything reachable today: every
+      // malformed escape tried here is rejected by `Uri.parse` inside
+      // shelf's own `Request`, so nothing gets this far. Kept because the
+      // decode happens before any credential is checked, `removeVersion`
+      // has always guarded its identical one, and a lenient parser in some
+      // later shelf would make this an unauthenticated 500.
+      return _badRequest('malformed uploader address');
+    }
     final String operatorEmail;
     try {
       operatorEmail = await _getUploaderEmail(req);
@@ -576,16 +956,29 @@ class App {
       return _unauthorized(e.message);
     }
     var package = await metaStore.queryPackage(name);
+    if (package == null) {
+      return _badRequest('package not found', status: HttpStatus.notFound);
+    }
 
-    // TODO: null
-    if (package?.uploaders?.contains(operatorEmail) == false) {
+    if (!_isUploader(package.uploaders, operatorEmail)) {
       return _badRequest('no permission', status: HttpStatus.forbidden);
     }
-    if (package?.uploaders?.contains(email) == false) {
+    // The stored spellings, not the one in the url, and all of them. The
+    // check above folds case while the store removes by exact match: a
+    // request naming `Alice@Example.org` for a list holding
+    // `alice@example.org` would otherwise pass the guard, remove nothing, and
+    // answer "uploader removed" while Alice kept publishing. Taking only the
+    // first is the same failure one step along — a package carrying both
+    // spellings, which the old literal-compare write path produced, keeps the
+    // other entry and with it the permission this call was asked to withdraw.
+    var stored = _storedUploaders(package.uploaders, email);
+    if (stored.isEmpty) {
       return _badRequest('email not uploader');
     }
 
-    await metaStore.removeUploader(name, email);
+    for (var entry in stored) {
+      await metaStore.removeUploader(name, entry);
+    }
     return _successMessage('uploader removed');
   }
 
@@ -609,7 +1002,7 @@ class App {
     if (package == null) {
       return _badRequest('package not found', status: HttpStatus.notFound);
     }
-    if (package.uploaders?.contains(operatorEmail) == false) {
+    if (!_isUploader(package.uploaders, operatorEmail)) {
       return _badRequest('no permission', status: HttpStatus.forbidden);
     }
 
@@ -870,9 +1263,17 @@ class App {
   /// terms and keep serving the previous release for hours. A url that
   /// changes with the content cannot be stale: the page itself is never
   /// cached, so it always points at the build that is actually running.
-  String get _indexHtml => _indexHtmlBody ??= index_html
-      .content({'APP_VERSION': version}).replaceFirst('src="main.dart.js"',
-          'src="main.dart.js?v=${_mainDartJsTag.replaceAll('"', '')}"');
+  /// Filled through the project's build-time template mechanism rather than
+  /// by rewriting the emitted markup: `{{$BUNDLE_VERSION}}` in
+  /// `unpub_web/web/index.html` becomes an interpolation in the generated
+  /// source. A `replaceFirst` on a bare `src="main.dart.js"` literal matched
+  /// one line of a generated file and would have silently done nothing —
+  /// reverting to the unversioned url this exists to avoid — the moment
+  /// webdev changed a quote or reordered an attribute.
+  String get _indexHtml => _indexHtmlBody ??= index_html.content({
+        'APP_VERSION': version,
+        'BUNDLE_VERSION': _mainDartJsTag.replaceAll('"', ''),
+      });
 
   String get _indexHtmlTag => _indexHtmlEtag ??= _etagOf(_indexHtml);
 
@@ -885,7 +1286,8 @@ class App {
   /// when nothing changed.
   shelf.Response _staticAsset(
       shelf.Request req, String body, String etag, String contentType) {
-    if (req.headers[HttpHeaders.ifNoneMatchHeader] == etag) {
+    var tags = req.headers[HttpHeaders.ifNoneMatchHeader];
+    if (tags != null && _ifNoneMatchHolds(tags, etag)) {
       return shelf.Response.notModified(headers: {
         HttpHeaders.cacheControlHeader: 'no-cache',
         HttpHeaders.etagHeader: etag,
@@ -898,11 +1300,27 @@ class App {
     });
   }
 
+  /// Serves the web UI shell.
+  ///
+  /// Every client-side route needs an entry here, or opening one directly —
+  /// a pasted link, a reload, a redirect from elsewhere on the server — hits
+  /// the router instead of the application and comes back "not found". The
+  /// list is deliberately explicit rather than a catch-all, so a genuinely
+  /// wrong url still says so; the price is that it has to be kept in step
+  /// with `unpub_web/lib/src/routes.dart`.
   @Route.get('/')
   @Route.get('/packages')
   @Route.get('/packages/<name>')
   @Route.get('/packages/<name>/versions/<version>')
+  @Route.get('/account')
+  @Route.get('/admin')
   Future<shelf.Response> indexHtml(shelf.Request req) async {
+    // The account and administration screens exist only when there is
+    // something to account for. Serving them otherwise gives a page whose
+    // very first request goes to an endpoint that is not routed.
+    if (auth == null && authOnlyRoutes.contains(req.requestedUri.path)) {
+      return shelf.Response.notFound('Not Found');
+    }
     return _staticAsset(
         req, _indexHtml, _indexHtmlTag, ContentType.html.mimeType);
   }

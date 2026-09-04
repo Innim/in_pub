@@ -63,8 +63,10 @@ Connect provider. Any spec-compliant provider works — nothing here is tied to
 a particular one; everything except the issuer url is read from the provider's
 discovery document.
 
-Only the web UI is affected. `dart pub get` and `dart pub publish` keep working
-exactly as before, so turning this on breaks nothing for existing consumers.
+By default only the web UI is affected: `dart pub get` and `dart pub publish`
+keep working exactly as before, so turning this on breaks nothing for existing
+consumers. Closing the pub client's side too is a second, separate step —
+see [Making the pub client private too](#making-the-pub-client-private-too).
 
 #### 1. Register a client with your provider
 
@@ -84,10 +86,16 @@ never the browser) using the **authorization code** flow, and note down its
 Two of these are worth being careful about.
 
 **The redirect uri must match byte for byte.** It is derived from
-`--auth-public-url` by appending `/auth/callback`, including any path prefix:
-with `--auth-public-url https://example.org/pub` the callback is
-`https://example.org/pub/auth/callback`. A mismatch in scheme, host, port,
+`--auth-public-url` by appending `/auth/callback`: with `--auth-public-url
+https://pub.example.org` the callback is
+`https://pub.example.org/auth/callback`. A mismatch in scheme, host, port,
 path or trailing slash makes the provider reject the sign-in.
+
+`--auth-public-url` must name the root of a host or subdomain — a path prefix
+such as `https://example.org/pub` is refused at startup. The built web UI
+carries `<base href="/">`, so it was never actually reachable under a prefix;
+only the redirect uri honoured one, which made the setup look half-working
+rather than wrong.
 
 **`offline_access` is not optional.** It is what makes the provider issue a
 refresh token, and the refresh token is the only way this server can keep
@@ -142,7 +150,10 @@ in_pub --auth \
 | `--auth-allowed-groups` | Comma-separated groups allowed in. Empty means any account on the issuer. |
 | `--auth-admin-groups` | Groups whose members may manage other people's sessions at `/auth/admin`. |
 | `--auth-trusted-proxies` | Addresses allowed to set `X-Forwarded-For`. Required behind a reverse proxy. |
-| `--auth-insecure-cookie` | Drops `Secure` from cookies so the flow works over plain http. Local testing only. |
+| `--auth-protect-pub-api` | Require a token for `dart pub get` too. Off by default; see below. Also closes `/badge`, which otherwise reveals which packages exist and their latest versions — pass `--auth-public-badges` to keep it open anyway. What this closes is who may *ask*: a badge is answered with a redirect to `img.shields.io` carrying the package name and its latest version, so an authorized viewer's browser still hands both to that third party. Closing badges stops anonymous enumeration, not disclosure to shields.io. `/logo` stays public either way: it is the same image whatever is hosted here. |
+| `--no-google-auth` | Stop accepting the original Google credential for publishing. |
+| `--auth-insecure-cookie` | Drops `Secure` from cookies so the flow works over plain http. Local testing only. It is a cookie attribute and nothing more; it does not open cross-origin access. |
+| `--auth-dev-origins` | Comma-separated origins allowed to read the JSON endpoints cross-origin, on top of `--auth-public-url` (e.g. `http://localhost:8080`). Each one is credentialed access to whatever a visitor's cookies open, so this is for a development tool on another port and nothing else. Needs `--auth`: without it nothing consults these origins, so passing them stops the server rather than reading as though it configured something. An entry that is not an origin stops the server. |
 | `--verbose` / `-v` | Logs the whole exchange with the provider. See [When sign-in does not work](#when-sign-in-does-not-work). |
 
 Two that are easy to miss:
@@ -160,9 +171,9 @@ intervals — and all have workable defaults. Run `in_pub --help` for the list.
 
 #### What it does
 
-- **Sessions live on the server**, so they can be ended: at `/auth/sessions`
-  for your own, and at `/auth/admin` for anyone else's if you are in an admin
-  group. Blocking someone there is independent of the provider — it keeps them
+- **Sessions live on the server**, so they can be ended: from the **Sessions**
+  tab of your account for your own, and at `/auth/admin` for anyone else's if
+  you are in an admin group. Blocking someone there is independent of the provider — it keeps them
   out of this repository while their account elsewhere is untouched.
 - **A stolen cookie is detected.** The session secret is re-issued every few
   minutes; once the browser has used the new one, a request still carrying the
@@ -175,7 +186,92 @@ intervals — and all have workable defaults. Run `in_pub --help` for the list.
   session within `--auth-revalidate-interval`. A provider *outage* is not
   treated as a revocation — nobody is blocked for it — but after
   `--auth-revalidate-hard` unverified users stop being served, so downtime
-  cannot be used to keep a revoked account alive.
+  cannot be used to keep a revoked account alive. The same bound applies when
+  it is this server that cannot ask — a rotated `INPUB_AUTH_SESSION_SECRET`
+  leaves the stored provider credentials unreadable — except that there it is
+  counted in attempts rather than elapsed time: tokens keep working for
+  `--auth-revalidate-max-failures` checks, and then stop until the account
+  signs in through the browser again, which is what restores this server's
+  ability to check it.
+
+#### Making the pub client private too
+
+By default only the web UI is gated: `dart pub get` and `dart pub publish`
+keep working for anyone who can reach the server. `--auth-protect-pub-api`
+closes that as well, so package metadata and the tarballs themselves need a
+token.
+
+Turn it on *after* handing out tokens — the moment it is on, every consumer
+that has not run `dart pub token add` stops resolving dependencies.
+
+**Getting a token.** Sign in, open your account from the header, and switch to
+the **Tokens** tab. The value is shown once and never again; only a hash of it
+is kept. Then:
+
+```sh
+dart pub token add https://pub.example.org
+# paste the token when prompted
+```
+
+For CI, keep it out of the process list and the shell history:
+
+```sh
+export PUB_TOKEN=...   # from your CI secret store
+dart pub token add https://pub.example.org --env-var PUB_TOKEN
+```
+
+Two things `pub` is strict about:
+
+- **https is required.** `dart pub token add` refuses a plain-http server
+  (localhost aside), so private mode needs TLS in front.
+- **The url must match what is in the pubspec.** `pub` sends the token only to
+  the exact prefix it was registered under, so the `hosted:` url in every
+  consuming `pubspec.yaml`, `--auth-public-url` and the url given to
+  `dart pub token add` all have to agree — scheme, host, port and path.
+
+**Tokens for automation.** A personal token belongs to the person who made it
+and stops working the moment their account is blocked or disabled upstream —
+which is usually what you want, and a nasty surprise for a release pipeline
+when they leave. Administrators can issue a *service token* on the same page:
+it belongs to no account and survives staff changes, at the cost of being
+revocable only here. Give each one a name that says where it runs.
+
+**Publishing.** Uploads have always authenticated; they now accept a token
+from this server as well as the original Google credential. The Google one
+authorises a publish only — it says nothing about group membership, and until
+its owner has signed in here it corresponds to no account on this server, so
+it cannot be used to read private packages. Whichever is used,
+the address it resolves to is what gets recorded as the package's uploader.
+
+**Every identity here has to be a real email address.** An account's address,
+a service token's, and each entry on a package's uploader list are all held to
+the same rule: an `@`, and a domain with at least one dot in it. A bare name
+is refused, and so is a single-label intranet domain —
+`dart pub uploader add ops@intranet` does not work, and neither does a service
+token carrying `ci@internal`. That is deliberate: an uploader entry is an
+identity matched against publishing credentials, and a value nothing can
+deliver to is one no person can hold.
+
+It is worth checking before you turn `--auth-protect-pub-api` on. If your
+provider reports dotless addresses — some AD and LDAP directories do — the
+people it reports them for cannot create a token at all, because the token
+would publish as something that is not an address, and with the pub API closed
+a token is the only credential there is. Put a real address on those directory
+entries.
+
+One limit applies to a Google credential that corresponds to no account here:
+with `--auth` on it cannot create a **new** package. Publishing further
+versions of a package it already uploads is unaffected — that is bounded by
+the package's uploader list — but a new name is bounded by nothing, and a
+repository whose owner asked for authentication should not accept one from
+anybody holding any Google account. Sign in through the web interface once,
+or publish with a token from it.
+
+The `unpub_auth` tool in this repository is that older path, and is now
+legacy: it obtains a Google credential, which still works — including against
+a server running without `--auth` at all, which is what it was written for.
+Nothing has to be migrated in a hurry, but new setups should use the tokens
+above. Once everyone has, turn the old path off with `--no-google-auth`.
 
 #### When sign-in does not work
 
@@ -198,15 +294,18 @@ Common answers, and what they mean:
 | `invalid_client` | Wrong client id or secret. The log shows the secret's length and flags stray whitespace — a trailing newline from copy-paste is the classic one. The server also retries the other ways of presenting the credentials before giving up, so this really does mean they are wrong. |
 | `redirect_uri` mismatch, or the provider refuses before you see a password prompt | `--auth-public-url` does not match what was registered. The verbose log prints the authorize url in full; compare its `redirect_uri` with the provider's registration character by character. |
 | Sign-in works, then "not a member of a group with access" | `groups` is missing from `userinfo`. The log warns about this explicitly. Allow the `groups` scope *and* claim for the client. |
-| "the provider returned no refresh token" | `offline_access` is not permitted for this client, or the provider only issues refresh tokens in a non-default mode. |
+| "The identity provider did not issue a refresh token" | Seen only after the server has already asked the provider to prompt for consent again and still received none. `offline_access` is not permitted for this client, or the provider only issues refresh tokens in a non-default mode. |
 | `invalid_grant` right after signing in | The authorization code expired or was replayed — usually a stale browser tab or a reloaded callback url. |
 
 #### Trying it locally
 
-Sign-in needs cookies that survive a redirect, which the `make dev-web` setup
-cannot provide: it serves the UI from a different origin than the API. Test
-against a server built with `make build`, over http, with
-`--auth-insecure-cookie` and `--auth-public-url http://localhost:4000`.
+Authentication cannot be exercised through `make dev-web` at all: it serves
+the UI from a different origin than the API, and the browser client does not
+send cookies cross-origin, so every request arrives unauthenticated. Adding
+that origin to `--auth-dev-origins` does not change this — it decides who may
+read what needs no session, not whether cookies are sent. Test against a
+server built with `make build`, over http, with `--auth-insecure-cookie` and
+`--auth-public-url http://localhost:4000`.
 
 
 ### API documentation

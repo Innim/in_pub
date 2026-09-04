@@ -326,16 +326,17 @@ void main() {
       }
     });
 
-    test('refuses to continue without a refresh token', () async {
-      // Without one the account could never be re-checked, so the session
-      // would outlive a revocation.
-      try {
-        await provider(token: (_) => tokens(refreshToken: null)).exchangeCode(
-            code: 'abc', codeVerifier: 'verifier', nonce: 'nonce');
-        fail('expected a failure');
-      } on IdentityUnavailableException catch (e) {
-        expect(e.message, contains('offline_access'));
-      }
+    test('reports a missing refresh token rather than refusing', () async {
+      // Refusing here looked right — without one the account can never be
+      // re-checked — but it is the wrong place to decide. The account may
+      // already hold a usable token from an earlier consent, and providers
+      // that issue one only on first consent return none on every later
+      // sign-in, so this turned an ordinary second sign-in into a 503 and
+      // made the callback's recovery path unreachable.
+      var result = await provider(token: (_) => tokens(refreshToken: null))
+          .exchangeCode(code: 'abc', codeVerifier: 'verifier', nonce: 'nonce');
+
+      expect(result.refreshToken, isNull);
     });
   });
 
@@ -486,6 +487,39 @@ void main() {
       await Future.wait([for (var i = 0; i < 5; i++) counted.discover()]);
       await counted.discover();
       expect(fetches, 1);
+    });
+  });
+
+  group('a token endpoint that answers oddly', () {
+    OidcProvider providerAnswering(http.Response Function() token) =>
+        OidcProvider(config, client: MockClient((request) async {
+          if (request.url.path.endsWith('openid-configuration')) {
+            return http.Response(discoveryDocument, 200);
+          }
+          return token();
+        }));
+
+    test('a 200 that is not a token response is an outage, not a refusal',
+        () async {
+      // A captive portal or a proxy answers 200 with HTML. Casting the body
+      // threw a raw TypeError past both identity exceptions — which is all
+      // any caller on the sign-in path handles — and surfaced as an
+      // unstyled 500 in the middle of signing in.
+      var provider =
+          providerAnswering(() => http.Response('<html>hello</html>', 200));
+
+      expect(
+          () => provider.exchangeCode(code: 'c', codeVerifier: 'v', nonce: 'n'),
+          throwsA(isA<IdentityUnavailableException>()));
+    });
+
+    test('a 200 with no access_token is an outage too', () async {
+      var provider = providerAnswering(
+          () => http.Response(json.encode({'token_type': 'bearer'}), 200));
+
+      expect(
+          () => provider.exchangeCode(code: 'c', codeVerifier: 'v', nonce: 'n'),
+          throwsA(isA<IdentityUnavailableException>()));
     });
   });
 }

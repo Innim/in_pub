@@ -9,6 +9,8 @@ dependencies:
   ngforms: 5.0.0-dev.3
   ngrouter: 4.0.0-dev.3
   http: ^0.13.3
+  # Used directly by app_service.dart; it resolved only through ngdart.
+  intl: ^0.18.1
   markdown: ^4.0.0
   unpub_api:
     path: ../unpub/lib/unpub_api

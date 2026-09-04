@@ -306,6 +306,26 @@ main() {
         meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0, email1, email2]));
       });
+
+      test('a name typed where an address belongs is refused', () async {
+        // An uploader entry is an identity. `alice` could never publish —
+        // `TokenService` refuses to issue a credential carrying anything
+        // that is not an address — and having written it, the server then
+        // declined to issue a *service* token for `alice` either, on the
+        // grounds that it already publishes packages here. One typed word
+        // locked the name out on both sides, and `dart pub uploader add`
+        // printed success.
+        for (var bad in const ['alice', 'alice@localhost', 'alice@ example']) {
+          var res = await addUploader(package0, bad);
+          expect(res.statusCode, HttpStatus.badRequest, reason: bad);
+          expect(json.decode(res.body)['error']['message'],
+              contains('not an email address'),
+              reason: bad);
+        }
+
+        expect((await _readMeta(package0))['uploaders'],
+            unorderedEquals([email0, email1, email2]));
+      });
     });
 
     group('remove', () {
@@ -331,6 +351,26 @@ main() {
 
         meta = await _readMeta(package0);
         expect(meta['uploaders'], unorderedEquals([email0]));
+      });
+
+      test('takes every spelling of the address, not just the first', () async {
+        // `addVersion` adds the uploader with `addToSet`, which compares
+        // literally, so before the write path recorded the spelling already on
+        // file a publish as `Email0@Example.com` appended a second entry for
+        // the same person. Removal resolved one variant and `$pull`ed that
+        // exact string: the other entry survived, the person kept publishing,
+        // and `dart pub uploader remove` printed success.
+        await _db.collection(packageCollection).updateOne(
+            where.eq('name', package0),
+            modify.addToSet('uploaders', 'Email0@Example.COM'));
+        expect((await _readMeta(package0))['uploaders'],
+            unorderedEquals([email0, 'Email0@Example.COM']));
+
+        var res = await removeUploader(package0, email0);
+        expect(res.statusCode, HttpStatus.ok);
+
+        expect((await _readMeta(package0))['uploaders'], isEmpty,
+            reason: 'a permission reported as withdrawn has to be withdrawn');
       });
     });
 

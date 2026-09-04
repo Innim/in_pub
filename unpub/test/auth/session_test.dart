@@ -29,6 +29,7 @@ void main() {
     Duration idle = const Duration(hours: 8),
     Duration ttl = const Duration(hours: 24),
     bool reuseKillsAll = false,
+    List<String> allowedGroups = const [],
   }) =>
       AuthConfig(
         enabled: true,
@@ -41,6 +42,7 @@ void main() {
         sessionIdle: idle,
         sessionTtl: ttl,
         reuseKillsAllSessions: reuseKillsAll,
+        allowedGroups: allowedGroups,
         // Keep revalidation out of the way; it has its own tests.
         revalidateInterval: const Duration(days: 365),
         revalidateHard: const Duration(days: 365),
@@ -122,6 +124,57 @@ void main() {
     });
   });
 
+  group('a session document that cannot be matched', () {
+    /// Empties [id]'s stored secret, as a write that failed half way or a
+    /// field lost in a migration leaves it — `StoredSession.fromJson`
+    /// defaults a missing `secretHash` to the empty string.
+    void corrupt(String id) {
+      var stored = store.sessions[id]!;
+      store.sessions[id] = StoredSession(
+        id: stored.id,
+        userId: stored.userId,
+        secretHash: '',
+        rotatedAt: stored.rotatedAt,
+        uaHash: stored.uaHash,
+        ip: stored.ip,
+        createdAt: stored.createdAt,
+        lastSeenAt: stored.lastSeenAt,
+        expiresAt: stored.expiresAt,
+      );
+    }
+
+    test('is not reported as a cloned cookie', () async {
+      var cookie = await signIn();
+      corrupt(sessionIdOf(cookie));
+
+      var result = await sessions.resolve(request(cookie));
+
+      expect(result.outcome, SessionOutcome.invalid,
+          reason: 'nothing can match a row with no secret on it, so this is '
+              'a broken document rather than a second holder of the cookie');
+      expect(result.message, isNull,
+          reason: 'telling the owner their session was used from more than '
+              'one place would be an accusation over a database fault');
+    });
+
+    test('does not sign the owner out everywhere', () async {
+      build(makeConfig(reuseKillsAll: true));
+      var broken = await signIn();
+      var other = await signIn();
+      corrupt(sessionIdOf(broken));
+
+      await sessions.resolve(request(broken));
+
+      expect(store.sessions[sessionIdOf(broken)]!.isRevoked, isTrue,
+          reason: 'the unusable row is ended rather than left to be counted '
+              'on the administration screen and swept forever');
+      expect(
+          (await sessions.resolve(request(other))).outcome, SessionOutcome.ok,
+          reason: 'one broken document must not end every session this '
+              'person has open');
+    });
+  });
+
   group('a cloned cookie', () {
     test('is detected once the real client has moved on', () async {
       var stolen = await signIn();
@@ -175,12 +228,22 @@ void main() {
       expect(otherSession!.isRevoked, isTrue);
     });
 
-    test('is detected when the cookie moves to another client application',
-        () async {
+    test(
+        'presented by another client application, the session ends — but '
+        'not as a theft', () async {
+      // The cookie is refused and the session revoked either way, so a
+      // thief is stopped. What changed is the framing: a browser that
+      // updates itself overnight changes its `User-Agent`, and reporting
+      // that as a stolen cookie showed its owner an alarming message and,
+      // with `--auth-reuse-kills-all`, killed their sessions everywhere.
       var cookie = await signIn();
       var result = await sessions
           .resolve(request(cookie, ua: 'curl/8.0 (not a browser)'));
-      expect(result.outcome, SessionOutcome.cloned);
+
+      expect(result.isAuthenticated, isFalse);
+      expect(result.outcome, SessionOutcome.invalid);
+      expect(store.sessions.values.single.isRevoked, isTrue,
+          reason: 'the cookie must stop working for whoever presented it');
     });
   });
 
@@ -285,6 +348,54 @@ void main() {
           shelf.Request('GET', Uri.parse('https://pub.example.org/packages')));
       expect(result.outcome, SessionOutcome.absent);
       expect(result.cookies, isEmpty);
+    });
+  });
+
+  group('tightening the allowed groups', () {
+    test('ends the session rather than merely refusing it', () async {
+      // Only this server's configuration changed, so the account is still
+      // active and the provider still vouches for it — nothing else would
+      // ever clear the row. Left alone it stays "live" for the whole idle
+      // window: counted on the administration screen, offered an End button,
+      // and re-checked against the provider every few minutes, all for
+      // somebody who cannot make a single request.
+      var cookie = await signIn();
+      build(makeConfig(allowedGroups: ['pubusers']));
+
+      // Rebuilding wiped the store, so put the same session back.
+      var user = const AuthenticatedUser(
+          id: 'user-1',
+          email: 'someone@example.org',
+          displayName: 'Someone',
+          groups: ['developers']);
+      await store.upsertUser(user, validatedAt: DateTime.now());
+      var setCookie = await sessions.create(
+          shelf.Request('GET', Uri.parse('https://pub.example.org/'),
+              headers: {'user-agent': userAgent}),
+          user);
+      cookie = cookieValue(setCookie);
+
+      var result = await sessions.resolve(request(cookie));
+      expect(result.isAuthenticated, isFalse);
+      expect(store.sessions.values.single.isRevoked, isTrue,
+          reason: 'the row has to stop counting as live');
+    });
+  });
+
+  group('a cookie presented by a different client', () {
+    test('ends the session without calling it a theft', () async {
+      // A browser that updates itself overnight changes its `User-Agent`.
+      // Reporting that as a stolen cookie showed the owner an alarming
+      // message and, with `--auth-reuse-kills-all`, killed their sessions
+      // everywhere else too.
+      var cookie = await signIn();
+
+      var result =
+          await sessions.resolve(request(cookie, ua: 'Mozilla/5.0 (newer)'));
+
+      expect(result.isAuthenticated, isFalse);
+      expect(result.outcome, SessionOutcome.invalid);
+      expect(store.sessions.values.single.isRevoked, isTrue);
     });
   });
 }

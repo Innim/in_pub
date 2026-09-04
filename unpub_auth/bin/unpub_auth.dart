@@ -39,7 +39,16 @@ void main(List<String> arguments) async {
     default:
       stdout.write(
         format('''
-An auth tool for in_pub. in_pub is using Google OAuth2 by default. There's two situations where the unpub_auth can be used.
+{@yellow}Legacy.{@end} An in_pub server started with {@green}--auth{@end} issues its own access
+tokens from its web interface: sign in, open {@green}Tokens{@end}, create one, and run the
+{@green}dart pub token add{@end} command it shows you. Those work for both {@green}pub get{@end} and
+{@green}pub publish{@end} and can be revoked from the same page.
+
+unpub_auth remains for the older arrangement: uploading with a Google credential,
+including against a server running without authentication at all. The server keeps
+accepting it until started with {@green}--no-google-auth{@end}.
+
+There's two situations where unpub_auth can be used.
 
 {@yellow}1. Login locally, and publish pub packages locally.{@end}
   {@blue}step 1.{@end} Call `unpub_auth login` when you first use it, and it will save credentials locally.
