@@ -1,6 +1,10 @@
 ## Unreleased
 
+### Changed
+- Generated API documentation accepts a bearer token as well as a browser session, so a CI job or a docs mirror can read it. It stays gated whenever `--auth` is on, with or without `--auth-protect-pub-api`.
+
 ### Fixed
+- A publish refused by the handler now carries the same `dart pub token add` instruction the gate's refusals do. On the default configuration the gate stands aside for `/api/`, so a publisher saw only the bare reason.
 - A group name with a space in it is no longer split into two: a `groups` claim sent as a delimited string is separated on commas alone, which is what the gateways that flatten one actually use.
 - Unblocking an account that is waiting for its owner to sign in is refused rather than accepted and undone by that account's next request. The web UI never offered it; the API did.
 - A shutdown that does not finish exits non-zero, and the release steps run whether the drain succeeded or not. A failed drain used to report a clean stop while leaving the database connection, the timers and the signal handlers behind.

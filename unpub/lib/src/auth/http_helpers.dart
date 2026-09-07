@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:shelf/shelf.dart' as shelf;
 
+import 'auth_config.dart';
 import 'crypto_box.dart';
 
 /// Parses a `Cookie` request header. Shelf leaves cookies alone, so this is
@@ -245,15 +246,41 @@ String returnTargetFor(shelf.Request req) =>
 /// stuck at the prompt. Built in one place because it is a contract with an
 /// external client: two copies would drift, and a caller would see a
 /// different shape depending on which refused it.
-shelf.Response pubUnauthorized(String message) => shelf.Response(
-      HttpStatus.unauthorized,
-      headers: {
-        HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
-        HttpHeaders.wwwAuthenticateHeader:
-            'Bearer realm="pub", message="${quoteHeaderValue(message)}"',
-        HttpHeaders.cacheControlHeader: 'no-store',
-      },
-      body: json.encode({
-        'error': {'message': message}
-      }),
-    );
+///
+/// [auth] is this server's configuration where the caller has one, so the
+/// refusal can say how to get a credential; see [pubUnauthorizedMessage].
+shelf.Response pubUnauthorized(String message, {AuthConfig? auth}) {
+  var full = pubUnauthorizedMessage(message, auth);
+  return shelf.Response(
+    HttpStatus.unauthorized,
+    headers: {
+      HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
+      HttpHeaders.wwwAuthenticateHeader:
+          'Bearer realm="pub", message="${quoteHeaderValue(full)}"',
+      HttpHeaders.cacheControlHeader: 'no-store',
+    },
+    body: json.encode({
+      'error': {'message': full}
+    }),
+  );
+}
+
+/// [message] followed by what to do about it, where there is anything to
+/// point at.
+///
+/// Two layers refuse the same publish. The gate does it while
+/// `--auth-protect-pub-api` is on; with it off — the default — the gate
+/// steps aside for `/api/**` and every refusal comes from the handler
+/// instead, which used to forward a bare "missing authorization header" and
+/// leave the publisher with nowhere to go. The wording lives here for the
+/// same reason [pubUnauthorized] does: two spellings of one instruction
+/// drift, and which of them a publisher sees would depend on a flag they
+/// cannot see.
+///
+/// With `--auth` off there is no token page to open and nothing to register
+/// with `dart pub token add`, so the bare message is the honest one.
+String pubUnauthorizedMessage(String message, AuthConfig? auth) {
+  if (auth == null || !auth.enabled) return message;
+  return '$message Create a token at ${auth.resolvePath('auth/tokens')} '
+      'and run: dart pub token add ${auth.publicUrl}';
+}

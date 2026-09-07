@@ -145,9 +145,16 @@ class App {
       );
 
   /// 401 for the pub client. Shared with the gate, so a caller sees the same
-  /// shape whichever of the two refused it.
-  static shelf.Response _unauthorized(String message) =>
-      pubUnauthorized(message);
+  /// shape — and the same instructions — whichever of the two refused it.
+  ///
+  /// Which one that is turns on a flag the publisher cannot see: with
+  /// `--auth-protect-pub-api` off, which is the default, the gate steps
+  /// aside for `/api/**` and every publish refusal is this one. Passing the
+  /// configuration along is what puts the token page and the
+  /// `dart pub token add` line in front of them here too; with `--auth` off
+  /// there is neither, [auth] is null, and the message stays bare.
+  shelf.Response _unauthorized(String message) =>
+      pubUnauthorized(message, auth: auth?.config);
 
   String _resolveUrl(shelf.Request req, String reference) {
     if (proxy_origin != null) {

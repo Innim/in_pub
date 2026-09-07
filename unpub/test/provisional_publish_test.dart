@@ -358,6 +358,22 @@ void main() {
     });
   });
 
+  test('a refusal with authentication off stays bare', () async {
+    // There is no token page to open and nothing to register with
+    // `dart pub token add`, so the instruction the gated server gives would
+    // be an address that answers 404. What is left is the reason.
+    var res = await app.router.call(shelf.Request(
+      'POST',
+      Uri.parse('http://localhost:4000/api/packages/versions/newUpload'),
+    ));
+
+    expect(res.statusCode, HttpStatus.unauthorized);
+    var header = res.headers[HttpHeaders.wwwAuthenticateHeader]!;
+    expect(header, contains('missing authorization header'));
+    expect(header, isNot(contains('dart pub token add')));
+    expect(header, isNot(contains('/auth/tokens')));
+  });
+
   group('with the pub API left open', () {
     // `--auth` without `--auth-protect-pub-api`, which is the default. The
     // gate steps aside for `/api/**` entirely, so every rule about what the
@@ -411,6 +427,29 @@ void main() {
       expect(res.statusCode, HttpStatus.unauthorized);
       expect(google.seen, isEmpty,
           reason: "somebody's password must not leave for a third party");
+    });
+
+    test('a refused publish says where to get a credential', () async {
+      // With the gate standing aside for `/api/**` — the default — every
+      // publish refusal comes from the handler, and it forwarded a bare
+      // "missing authorization header": nothing on the publisher's screen
+      // said this server issues tokens, let alone where. The gate's own
+      // refusal has always carried the instruction, so which sentence
+      // somebody read depended on a flag they cannot see.
+      var res = await gatelessApp.router.call(shelf.Request(
+        'POST',
+        Uri.parse('http://localhost:4000/api/packages/versions/newUpload'),
+      ));
+
+      expect(res.statusCode, HttpStatus.unauthorized);
+      // `dart pub` prints the `message` parameter back, which makes it the
+      // only place an instruction reaches somebody stuck at the prompt.
+      var header = res.headers[HttpHeaders.wwwAuthenticateHeader]!;
+      expect(header, contains('missing authorization header'));
+      expect(header, contains('https://pub.example.org/auth/tokens'));
+      expect(header, contains('dart pub token add https://pub.example.org'));
+      expect(json.decode(await res.readAsString())['error']['message'],
+          contains('dart pub token add'));
     });
 
     test('a Google credential cannot delete a published version', () async {

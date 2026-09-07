@@ -456,6 +456,120 @@ void main() {
     });
   });
 
+  group('generated documentation', () {
+    // A read of a package's contents, like a tarball, and fetched both ways:
+    // the web UI links straight to it from the package page, while a docs
+    // mirror or a CI job that has run `dart pub token add` has no cookie to
+    // present. As a `web` route only the cookie ever worked, so a token
+    // holder could not authenticate for it at all — the hole closed badges
+    // had.
+    const docPath = '/documentation/my_package/1.0.0/';
+
+    /// A signed-in browser's cookie. The session is created from a
+    /// browser-looking request because the clone check compares the client
+    /// the session was issued to with the one presenting it.
+    Future<String> browserSession() async {
+      var user = const AuthenticatedUser(
+          id: 'user-1', email: 'someone@example.org', displayName: 'Someone');
+      await store.upsertUser(user, validatedAt: DateTime.now());
+      return (await auth.sessions.create(
+              shelf.Request('GET', Uri.parse('https://pub.example.org/'),
+                  headers: {'user-agent': 'Mozilla/5.0'}),
+              user))
+          .split(';')
+          .first;
+    }
+
+    Future<shelf.Response> browserGet(String path,
+            {String? cookie, bool navigating = false}) async =>
+        handler(shelf.Request('GET', Uri.parse('https://pub.example.org$path'),
+            headers: {
+              'user-agent': 'Mozilla/5.0',
+              if (cookie != null) 'cookie': cookie,
+              if (navigating) ...{
+                'sec-fetch-mode': 'navigate',
+                'accept': 'text/html',
+              },
+            }));
+
+    test('opens to a token', () async {
+      var token = await tokenFor();
+      expect((await pubGet(docPath, token: token)).statusCode, HttpStatus.ok);
+    });
+
+    test('opens to a signed-in browser too', () async {
+      // The package page links straight here, so refusing the cookie would
+      // hand a signed-in person a JSON error where they asked for a page.
+      var cookie = await browserSession();
+      expect((await browserGet(docPath, cookie: cookie)).statusCode,
+          HttpStatus.ok);
+    });
+
+    test('is refused without either', () async {
+      expect((await pubGet(docPath)).statusCode, HttpStatus.unauthorized);
+    });
+
+    test('stays closed with the pub API left open', () async {
+      // `--auth-protect-pub-api` is off by default, and the rest of the pub
+      // surface is open there. Documentation is not: it is generated from a
+      // private package's source and has never been readable without signing
+      // in, so inheriting that rule would have published every private
+      // package's API reference on the default configuration — as the side
+      // effect of making it reachable with a token.
+      build(protectPubApi: false);
+
+      expect((await pubGet(docPath)).statusCode, HttpStatus.unauthorized,
+          reason: 'documentation follows the web UI it is linked from');
+      expect((await pubGet(docPath, token: await tokenFor())).statusCode,
+          HttpStatus.ok);
+      expect(
+          (await browserGet(docPath, cookie: await browserSession()))
+              .statusCode,
+          HttpStatus.ok);
+      // And the flag still means what it says for everything else.
+      expect(
+          (await pubGet('/api/packages/my_package')).statusCode, HttpStatus.ok);
+    });
+
+    test('a browser is sent to sign in rather than handed JSON', () async {
+      // Somebody following the "API reference" link after their session
+      // lapsed is owed the sign-in flow, which is what `web` gave them
+      // before this moved.
+      var res = await browserGet(docPath, navigating: true);
+
+      expect(res.statusCode, HttpStatus.found);
+      expect(res.headers['location'], startsWith('/auth/login'));
+    });
+
+    test('a token holder may keep what it fetched, like the browser may',
+        () async {
+      // The marking used to be applied only on the session branch of the
+      // outer gate, which documentation no longer takes. A doc set is
+      // hundreds of files; `no-store` means every one of them is downloaded
+      // again on every click through it, whichever credential opened it.
+      inner = (_) => shelf.Response.ok('doc page', headers: {
+            HttpHeaders.etagHeader: '"abc-1"',
+          });
+
+      var res = await pubGet(docPath, token: await tokenFor());
+      expect(res.headers[HttpHeaders.cacheControlHeader], 'private, no-cache');
+      expect(res.headers['vary'], contains('Authorization'));
+    });
+
+    test('but a tarball is still not held', () async {
+      // Only documentation is: everything else on this surface is answered
+      // without a validator, so `no-cache` there would be `no-store` with an
+      // extra round trip.
+      inner = (_) => shelf.Response.ok('archive', headers: {
+            HttpHeaders.etagHeader: '"abc-1"',
+          });
+
+      var res = await pubGet('/packages/my_package/versions/1.0.0.tar.gz',
+          token: await tokenFor());
+      expect(res.headers[HttpHeaders.cacheControlHeader], 'private, no-store');
+    });
+  });
+
   group('the original Google credential', () {
     setUp(() => build(withLegacy: true));
 
