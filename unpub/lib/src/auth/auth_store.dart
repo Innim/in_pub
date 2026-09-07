@@ -316,6 +316,19 @@ class StoredToken {
 
   bool isUsable(DateTime now) => !isRevoked && !isExpired(now);
 
+  /// The address folded for comparison, stored beside the original exactly
+  /// as [StoredUser.emailKey] is.
+  ///
+  /// `TokenService._issue` already folds before it writes, so for a row this
+  /// build creates this repeats the address rather than deriving anything
+  /// new. What it adds is a field a query can name and an index can serve:
+  /// the lookup that decides whether a second credential may be issued for
+  /// an identity ran as a case-insensitive regex over every token row, and
+  /// it runs on the sign-in path. A row *without* this field is one written
+  /// before the folding, which is the only kind that still has to be matched
+  /// by pattern.
+  String get emailKey => normalizeAddress(email);
+
   AuthenticatedUser toAuthenticatedUser({List<String> groups = const []}) =>
       AuthenticatedUser(
           id: userId ?? 'token:$id',
@@ -329,6 +342,7 @@ class StoredToken {
         'kind': kind.name,
         'userId': userId,
         'email': email,
+        'emailKey': emailKey,
         'displayName': displayName,
         'name': name,
         'createdBy': createdBy,
@@ -539,7 +553,16 @@ abstract class AuthStore {
   Future<int> revokeUserSessions(String userId, String reason,
       {String? exceptSessionId});
 
-  Future<List<StoredSession>> listUserSessions(String userId);
+  /// This user's live sessions: not revoked, not past their expiry, and used
+  /// within [idle].
+  ///
+  /// The idle window is part of the query rather than something the caller
+  /// applies afterwards. It is configuration this layer does not hold, which
+  /// is why it is passed in — but leaving it out meant the account screen
+  /// re-applied it in Dart while `usersWithLiveSessions` and
+  /// [liveSessionCounts] took it from the store, so the two screens decided
+  /// what "live" means by different rules.
+  Future<List<StoredSession>> listUserSessions(String userId, Duration idle);
 
   /// Drops sessions that are past their expiry or idle deadline. Called from
   /// the background sweep.

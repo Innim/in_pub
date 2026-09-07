@@ -2,6 +2,7 @@
 
 ### Changed
 - Generated API documentation accepts a bearer token as well as a browser session, so a CI job or a docs mirror can read it. It stays gated whenever `--auth` is on, with or without `--auth-protect-pub-api`.
+- Three queries on the sign-in and sweep paths no longer scan their whole collection: the session sweep and the service-token address lookup are answered from indexes, and the clash warning a sign-in logs is no longer waited for. Token documents gain a folded `emailKey`, and `--auth-session-idle` is applied in one place instead of three.
 
 ### Fixed
 - A publish refused by the handler now carries the same `dart pub token add` instruction the gate's refusals do. On the default configuration the gate stands aside for `/api/`, so a publisher saw only the bare reason.
@@ -15,6 +16,7 @@
 - The uploader and publish routes authenticate before they read or validate anything the caller sent, and an `Authorization` header carrying a scheme other than `bearer` is refused rather than having its value handed to Google's `tokeninfo` — a proxy adding Basic auth in front of this server sent the password there.
 
 ### Breaking
+- `AuthStore.listUserSessions` now takes the idle window, so the account screen and the administration screen stop deriving "live session" from different rules. Anyone with their own `AuthStore` implementation has to drop sessions unused for longer than it.
 - `AuthStore.rotateSession` no longer takes `prevSecretHash`: the expected secret is the one that stays acceptable, and every other choice strands a cookie a client may still hold. Anyone with their own `AuthStore` implementation has to drop the parameter.
 
 ## 3.5.0

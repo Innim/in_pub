@@ -393,9 +393,20 @@ class AuthRoutes {
     // already publishes as is the same collision, and nothing was looking
     // for it — `UserValidator` sees an existing account *change* address,
     // which a first sign-in is not.
+    //
+    // Deliberately not awaited, as the startup migration is not: it asks the
+    // store a question, and what it produces is a line in the log. Awaiting
+    // it put a round trip to the database in front of the redirect that
+    // completes a sign-in, on every first sign-in and every address change,
+    // to tell an administrator something no user is waiting to hear. The
+    // call swallows and logs its own failures, and `catchError` covers what
+    // could still escape it — nothing awaits this, so an error would have
+    // nowhere to go but the root zone, which kills the isolate.
     if (known == null ||
         normalizeAddress(known.email) != normalizeAddress(identity.email)) {
-      await warnOnServiceTokenClash(store, identity.email, identity.id);
+      unawaited(warnOnServiceTokenClash(store, identity.email, identity.id)
+          .catchError((Object e) =>
+              _log.warning('the service-token clash check failed: $e')));
     }
 
     // Either the provider is vouching for them again after a revocation, or
@@ -498,7 +509,6 @@ class AuthRoutes {
   Future<shelf.Response> _accountViewOf(SessionResult result) async {
     var user = result.user!;
     var isAdmin = config.isAdmin(user.groups);
-    var now = DateTime.now();
 
     // Overlapped through a record's `wait`, which keeps the element types
     // and, unlike awaiting them one at a time, has a listener on each from
@@ -509,7 +519,7 @@ class AuthRoutes {
     List<StoredToken> serviceRows;
     try {
       (sessionRows, tokenRows, serviceRows) = await (
-        store.listUserSessions(user.id),
+        store.listUserSessions(user.id, config.sessionIdle),
         store.listTokensOfUser(user.id),
         isAdmin ? _serviceTokensOrNone() : Future.value(const <StoredToken>[]),
       ).wait;
@@ -526,21 +536,14 @@ class AuthRoutes {
           cookies: result.cookies);
     }
 
-    // Only the sessions are filtered here, and only for the idle window: the
-    // store's query drops revoked and expired rows itself, but it cannot
-    // express "unused for longer than `--auth-session-idle`", which is
-    // configuration this layer holds. Showing one of those as live would put
-    // an "End" button on a session that is already gone.
-    //
-    // The token listings get nothing. Both stores enforce liveness in the
-    // query and both say so in a comment warning that a caller filtering
-    // afterwards would pass in test and read history in production — so
-    // re-applying it here put the rule in a third place, where it can only
-    // ever drift from the two that decide it.
-    var sessions_ = sessionRows
-        .where((s) => !s.isRevoked && !s.isExpired(now, config.sessionIdle))
-        .map(_sessionView)
-        .toList();
+    // Nothing is filtered here. Every listing above enforces liveness in the
+    // query, the idle window included: it is configuration this layer holds,
+    // so it is handed to the store rather than applied to what comes back.
+    // Both stores say so in a comment warning that a caller filtering
+    // afterwards would pass in test and read history in production — and the
+    // sessions did exactly that, which put "is this session live" in a third
+    // place where it could only ever drift from the two that decide it.
+    var sessions_ = sessionRows.map(_sessionView).toList();
     var tokens_ = tokenRows.map(_tokenView).toList();
     var serviceTokens_ = serviceRows.map(_tokenView).toList();
     var view = AccountView(
@@ -732,11 +735,14 @@ class AuthRoutes {
   /// administrators acting at once each get a token for one identity, and
   /// revoking either leaves the other publishing as that person. A unique
   /// index would be the airtight answer, but it cannot be built on a
-  /// deployment that already holds duplicates — and the token's address is
-  /// not stored folded, so the index would not even enforce the rule this
-  /// check applies. One process owns this collection, so serialising the
-  /// pair here closes the window that actually exists; two servers sharing a
-  /// database still race, and that is written down as the residual risk.
+  /// deployment that already holds duplicates. The folded address is a
+  /// stored field now — `emailKey`, put there so the address lookup could be
+  /// answered from an index — so such a constraint would at last express the
+  /// rule this check applies; what stands in the way is the rows already
+  /// written, which is a migration and not this. One process owns this
+  /// collection, so serialising the pair here closes the window that
+  /// actually exists; two servers sharing a database still race, and that is
+  /// written down as the residual risk.
   final _addressClaims = <String, Future<void>>{};
 
   /// Runs [work] with nobody else claiming [email].

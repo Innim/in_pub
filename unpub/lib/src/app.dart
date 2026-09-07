@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:collection/collection.dart' show IterableExtension;
 import 'package:crypto/crypto.dart' show sha1;
+import 'package:meta/meta.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:mime/mime.dart';
@@ -326,17 +327,32 @@ class App {
   /// Merged rather than set: the gate lists `Authorization` and sometimes
   /// `Cookie` as well, and overwriting that would tell a shared cache it may
   /// serve one token holder's private metadata to the next.
-  static shelf.Handler _varyOnOrigin(shelf.Handler inner) =>
+  ///
+  /// This runs on every answer the server gives — every static asset, every
+  /// 304, every metadata read — so it is written to allocate nothing in the
+  /// two cases that are almost all of them: no `Vary` at all, and one that
+  /// cannot possibly name `Origin`. The splitting is kept for the case where
+  /// it is needed, since `X-Origin-Id` contains "origin" without listing it
+  /// and the emitted header has to stay exactly what it was.
+  ///
+  /// Visible for testing because that exactness is the whole point of it: it
+  /// is reachable through the pipeline only for the `Vary` values this
+  /// server's own handlers happen to produce.
+  @visibleForTesting
+  static shelf.Handler varyOnOrigin(shelf.Handler inner) =>
       (shelf.Request req) async {
         var response = await inner(req);
         var stated = response.headers[HttpHeaders.varyHeader];
-        var fields =
-            (stated ?? '').split(',').map((f) => f.trim().toLowerCase());
-        if (fields.any((f) => f == 'origin' || f == '*')) return response;
-        return response.change(headers: {
-          HttpHeaders.varyHeader:
-              stated == null || stated.isEmpty ? 'Origin' : '$stated, Origin',
-        });
+        if (stated == null || stated.isEmpty) {
+          return response.change(headers: {HttpHeaders.varyHeader: 'Origin'});
+        }
+        var lower = stated.toLowerCase();
+        if (lower.contains('origin') || lower.contains('*')) {
+          var fields = lower.split(',').map((f) => f.trim());
+          if (fields.any((f) => f == 'origin' || f == '*')) return response;
+        }
+        return response
+            .change(headers: {HttpHeaders.varyHeader: '$stated, Origin'});
       };
 
   Future<HttpServer> serve([String host = '0.0.0.0', int port = 4000]) async {
@@ -365,7 +381,7 @@ class App {
     // them. A CDN or reverse proxy keying on the url alone then holds one
     // origin's header and replays it to the next caller. The wildcard branch
     // below needs none of this: `*` is the same answer for everybody.
-    if (authService != null) pipeline = pipeline.addMiddleware(_varyOnOrigin);
+    if (authService != null) pipeline = pipeline.addMiddleware(varyOnOrigin);
     pipeline = pipeline
         .addMiddleware(authService == null
             // A wildcard, not the caller's origin reflected back. The

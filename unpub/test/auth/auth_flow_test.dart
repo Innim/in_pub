@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -284,6 +285,10 @@ void main() {
           .listen((record) => warnings.add(record.message));
       try {
         await signIn();
+        // The check is fired and not awaited, so the sign-in answers before
+        // it has asked anything. The warning is still made — a turn or two
+        // of the event loop later.
+        await pumpEventQueue();
       } finally {
         await listening.cancel();
       }
@@ -293,6 +298,26 @@ void main() {
           reason: 'reported, not repaired: which of the two is wrong is a '
               'judgement, and refusing the sign-in would lock a person out '
               'over a token an administrator minted');
+    });
+
+    test('and the sign-in does not wait for that check to answer', () async {
+      // It asks the token store, which is a round trip to the database, and
+      // what it produces is one advisory line in the log. Awaited, it sat in
+      // front of the redirect that completes a sign-in — on every first
+      // sign-in and every address change — so a browser waited on an answer
+      // meant for an administrator reading the log tomorrow.
+      var stalling = _StoreThatNeverAnswersTheClashCheck();
+      build(withStore: stalling);
+
+      var jar = await signIn().timeout(const Duration(seconds: 5),
+          onTimeout: () => throw StateError(
+              'the sign-in waited for the clash check to answer'));
+
+      expect(jar, isNotEmpty);
+      expect(stalling.asked, isTrue,
+          reason: 'still asked, just not waited for');
+      stalling.answer.complete(const []);
+      await pumpEventQueue();
     });
 
     test('reports the signed-in user to the web UI', () async {
@@ -1160,6 +1185,37 @@ void main() {
           reason: 'and it is the store that decided that');
     });
 
+    test('and a session idle too long is gone from both of them at once',
+        () async {
+      // "Live" was decided twice: the store's session query left the idle
+      // window out, so the account screen re-applied it in Dart while the
+      // administration screen took it from the store. Two screens, two
+      // rules, differing by exactly the window an operator configures.
+      var jar = await signIn();
+      var current = (await account(jar))['currentSessionId'] as String;
+      var other = await auth.sessions.create(
+          shelf.Request('GET', Uri.parse('https://pub.example.org/'),
+              headers: {'user-agent': 'Mozilla/5.0 (other)'}),
+          store.users['user-1']!.toAuthenticatedUser());
+      var otherId = other.split('=')[1].split('.').first;
+      expect((await account(jar))['sessions'], hasLength(2));
+
+      // Not used since well before the idle deadline, and the sweep has not
+      // come round yet — which is the state the two answers disagreed about.
+      await store.touchSession(
+          otherId, DateTime.now().subtract(auth.config.sessionIdle * 2));
+
+      var listed = ((await account(jar))['sessions'] as List)
+          .map((s) => (s as Map<String, dynamic>)['id']);
+      expect(listed, [current]);
+      expect(
+          (await store.liveSessionCounts(auth.config.sessionIdle))['user-1'], 1,
+          reason: 'the administration screen counts the same one session');
+      expect(await store.listUserSessions('user-1', auth.config.sessionIdle),
+          hasLength(1),
+          reason: 'and it is the store that decided that, not the screen');
+    });
+
     /// A POST whose body is exactly [raw], bypassing the JSON encoding the
     /// helper above does — which is the whole point.
     Future<shelf.Response> postRaw(String path, Map<String, String> jar,
@@ -1508,6 +1564,21 @@ void main() {
   });
 }
 
+/// A store whose service-token lookup never answers.
+///
+/// Stands in for the collection scan that lookup used to be: the sign-in has
+/// to finish while it is still outstanding.
+class _StoreThatNeverAnswersTheClashCheck extends MemoryAuthStore {
+  final answer = Completer<List<StoredToken>>();
+  bool asked = false;
+
+  @override
+  Future<List<StoredToken>> serviceTokensForEmail(String email) {
+    asked = true;
+    return answer.future;
+  }
+}
+
 /// A store whose service-token listing is having a bad day.
 class _StoreThatCannotListServiceTokens extends MemoryAuthStore {
   @override
@@ -1517,7 +1588,8 @@ class _StoreThatCannotListServiceTokens extends MemoryAuthStore {
 
 class _StoreThatCannotListSessions extends MemoryAuthStore {
   @override
-  Future<List<StoredSession>> listUserSessions(String userId) async =>
+  Future<List<StoredSession>> listUserSessions(
+          String userId, Duration idle) async =>
       throw StateError('the database is unreachable');
 }
 
