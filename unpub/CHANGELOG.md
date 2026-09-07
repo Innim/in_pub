@@ -1,3 +1,9 @@
+## Unreleased
+
+### Fixed
+- Removing the last uploader of a package is refused instead of committed: an empty uploader list left the package impossible to publish to, delete from or add an uploader back to, short of editing the database.
+- The uploader and publish routes authenticate before they read or validate anything the caller sent, and an `Authorization` header carrying a scheme other than `bearer` is refused rather than having its value handed to Google's `tokeninfo` — a proxy adding Basic auth in front of this server sent the password there.
+
 ## 3.5.0
 
 ### Added

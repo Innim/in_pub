@@ -64,6 +64,25 @@ shelf.Response withCookies(shelf.Response response, List<String> cookies) {
   });
 }
 
+/// The bearer token on a request, or null when there is none.
+///
+/// Null covers both "no `Authorization` header" and "a header carrying some
+/// other scheme", because neither yields a token this server can resolve.
+/// Splitting on whitespace and taking the last word did yield one: an
+/// `Authorization: Basic dXNlcjpwYXNz` from a reverse proxy handed the
+/// base64 of somebody's `user:pass` to the credential resolvers, which try
+/// this server's own tokens, miss, and fall through to Google's `tokeninfo`
+/// endpoint — a password out of the building to a third party. Shared
+/// between the gate and the publish path so that the strict parse cannot
+/// hold on one and not the other.
+String? bearerTokenOf(shelf.Request req) {
+  var header = req.headers[HttpHeaders.authorizationHeader];
+  if (header == null || !header.toLowerCase().startsWith('bearer ')) {
+    return null;
+  }
+  return header.substring('bearer '.length).trim();
+}
+
 /// The address the request came from, as far as it can be trusted.
 ///
 /// `X-Forwarded-For` is honoured only when the immediate peer is one of

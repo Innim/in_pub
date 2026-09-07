@@ -175,8 +175,8 @@ class AuthMiddleware {
       {bool alwaysGate = false}) async {
     if (!config.protectPubApi && !alwaysGate) return inner(req);
 
-    var header = req.headers[HttpHeaders.authorizationHeader];
-    if (header == null || !header.toLowerCase().startsWith('bearer ')) {
+    var token = bearerTokenOf(req);
+    if (token == null) {
       if (!_isPublishFlow(req)) {
         var session = await sessions.resolve(req);
         if (session.isAuthenticated) {
@@ -199,7 +199,7 @@ class AuthMiddleware {
     }
 
     var result = await resolveBearer(
-      header.substring('bearer '.length).trim(),
+      token,
       ip: clientIp(req, config.trustedProxies),
       // The original Google credential proves only that somebody holds a
       // Google account: it carries no group, and until they have signed in

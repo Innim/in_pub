@@ -152,7 +152,10 @@ void main() {
       'established',
       const [],
       true,
-      const ['alice@example.org'],
+      // Two people, so that removing one is not removing the last: a
+      // package left with an empty uploader list can never be published to
+      // again, and `removeUploader` refuses that outright.
+      const ['alice@example.org', 'bob@example.org'],
       DateTime.now(),
       DateTime.now(),
       null,
@@ -283,14 +286,88 @@ void main() {
     expect(validated, isEmpty);
   });
 
+  test('the last uploader cannot be removed', () async {
+    // Every stored spelling of the address goes, which means the last two
+    // entries can be one person: `Alice@Example.org` and
+    // `alice@example.org` is exactly the pair the old literal-compare write
+    // path produced. Emptying the list froze the package — nobody could
+    // publish to it, delete from it, or add an uploader back, because
+    // `addUploader` asks the caller to be an uploader already.
+    metaStore.existing['established'] = UnpubPackage(
+      'established',
+      const [],
+      true,
+      const ['Alice@Example.org', 'alice@example.org'],
+      DateTime.now(),
+      DateTime.now(),
+      null,
+    );
+
+    var res = await app.router.call(shelf.Request(
+      'DELETE',
+      Uri.parse('http://localhost:4000/api/packages/established/uploaders/'
+          '${Uri.encodeComponent('alice@example.org')}'),
+      context: {
+        bearerPrincipalContextKey: const AuthenticatedUser(
+            id: 'u', email: 'alice@example.org', displayName: 'A'),
+        bearerProvisionalContextKey: false,
+      },
+    ));
+
+    expect(res.statusCode, HttpStatus.badRequest);
+    expect(json.decode(await res.readAsString())['error']['message'],
+        contains('at least one uploader'));
+    expect(metaStore.removed, isEmpty,
+        reason: 'a refused removal removes nothing at all');
+  });
+
+  group('adding an uploader authenticates before it reads the body', () {
+    // Everything the handler did with the body used to run first, for
+    // anybody at all: the gate steps aside for `/api/**` unless
+    // `--auth-protect-pub-api` is on, which is the default.
+    Future<shelf.Response> anonymously(String body) => app.router.call(
+          shelf.Request(
+            'POST',
+            Uri.parse(
+                'http://localhost:4000/api/packages/established/uploaders'),
+            body: body,
+          ),
+        );
+
+    test('and does not quote it back', () async {
+      // The content checks answered a 400 carrying the caller's own string,
+      // before anybody had proved who they were.
+      var res = await anonymously('email=not-an-address-at-all');
+
+      expect(res.statusCode, HttpStatus.unauthorized);
+      // The refusal travels in the body and in `WWW-Authenticate`, and
+      // neither may repeat what the caller sent.
+      expect('${await res.readAsString()}${res.headers}',
+          isNot(contains('not-an-address-at-all')),
+          reason: 'an unauthenticated caller is not owed a reading of what '
+              'they sent');
+    });
+
+    test('and does not parse it', () async {
+      // `Uri.splitQueryString` throws `ArgumentError` on an escape it cannot
+      // decode, and nothing caught it: `email=%zz` from a caller who had
+      // shown no credential at all was a 500 out of the handler.
+      var res = await anonymously('email=%zz');
+
+      expect(res.statusCode, HttpStatus.unauthorized);
+    });
+  });
+
   group('with the pub API left open', () {
     // `--auth` without `--auth-protect-pub-api`, which is the default. The
     // gate steps aside for `/api/**` entirely, so every rule about what the
     // legacy Google credential may do has to hold here too — enforcing it
     // only in the middleware left it unenforced on most deployments.
     late App gatelessApp;
+    late _FakeGoogle google;
 
     setUp(() {
+      google = _FakeGoogle();
       gatelessApp = App(
         metaStore: metaStore,
         packageStore: _MemoryPackageStore(),
@@ -305,9 +382,35 @@ void main() {
           ),
           store: MemoryAuthStore(),
           provider: FakeIdentityProvider(),
-          legacyResolver: _FakeGoogle(),
+          legacyResolver: google,
         ),
       );
+    });
+
+    test('a Basic credential is never taken for a token', () async {
+      // The publish path used to read the token as the last word of the
+      // `Authorization` header, whatever the scheme said. A reverse proxy
+      // adding Basic auth in front of a private repository is an ordinary
+      // deployment, and its base64 of `user:pass` — reversible by anyone —
+      // was then offered to every resolver in turn, ending at Google's
+      // `tokeninfo` endpoint. The gate has always parsed the scheme
+      // strictly, but it steps aside for `/api/**` by default, so this is
+      // the parser that runs.
+      // The publish handshake, because that is the one surface where the
+      // legacy credential is still admitted and so the one where a value
+      // taken for a token actually travels to Google.
+      var res = await gatelessApp.router.call(shelf.Request(
+        'POST',
+        Uri.parse('http://localhost:4000/api/packages/versions/newUpload'),
+        headers: {
+          // base64 of `user:hunter2`.
+          HttpHeaders.authorizationHeader: 'Basic dXNlcjpodW50ZXIy',
+        },
+      ));
+
+      expect(res.statusCode, HttpStatus.unauthorized);
+      expect(google.seen, isEmpty,
+          reason: "somebody's password must not leave for a third party");
     });
 
     test('a Google credential cannot delete a published version', () async {
@@ -429,8 +532,15 @@ class _MemoryPackageStore extends PackageStore {
 }
 
 /// Stands in for the original Google credential.
+///
+/// [seen] records what was handed to it, because "this never reached Google"
+/// is the whole of what one of these tests asserts.
 class _FakeGoogle extends GoogleCredentialResolver {
+  final seen = <String>[];
+
   @override
-  Future<String?> resolve(String token) async =>
-      token == 'legacy-ok' ? 'old@example.org' : null;
+  Future<String?> resolve(String token) async {
+    seen.add(token);
+    return token == 'legacy-ok' ? 'old@example.org' : null;
+  }
 }

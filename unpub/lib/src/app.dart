@@ -230,10 +230,21 @@ class App {
       );
     }
 
-    var authHeader = req.headers[HttpHeaders.authorizationHeader];
-    if (authHeader == null) throw AuthException('missing authorization header');
-
-    var token = authHeader.split(' ').last;
+    // The scheme, not the last word on the line, and by the same parser the
+    // gate uses. `Authorization: Basic <base64 of user:pass>` had its base64
+    // taken for a token and passed to the resolvers below, which miss on this
+    // server's own tokens and fall through to Google's `tokeninfo`. A reverse
+    // proxy adding Basic auth in front of a private repository is an ordinary
+    // deployment, so that sent somebody's password to a third party. The gate
+    // has always parsed strictly, but it steps aside for `/api/**` unless
+    // `--auth-protect-pub-api` is on, which leaves this the parser on the
+    // default path.
+    var token = bearerTokenOf(req);
+    if (token == null) {
+      throw AuthException(req.headers[HttpHeaders.authorizationHeader] == null
+          ? 'missing authorization header'
+          : 'authorization header must use the bearer scheme');
+    }
 
     var authService = auth;
     if (authService != null) {
@@ -891,9 +902,31 @@ class App {
 
   @Route.post('/api/packages/<name>/uploaders')
   Future<shelf.Response> addUploader(shelf.Request req, String name) async {
-    var body = await req.readAsString();
-    // Not `!`: a request without the field is a bad request, not a crash.
-    var email = Uri.splitQueryString(body)['email']?.trim() ?? '';
+    // Who is asking, before the body is so much as read. The gate steps
+    // aside for `/api/**` unless `--auth-protect-pub-api` is on, which is
+    // the default, so everything below this point used to run for whoever
+    // could open a socket: an unbounded read, and a `splitQueryString` that
+    // throws `ArgumentError` on a malformed escape — `email=%zz` was an
+    // unauthenticated 500 — followed by a 400 quoting the caller's own
+    // string back at them.
+    final String operatorEmail;
+    try {
+      operatorEmail = await _getUploaderEmail(req);
+    } on AuthException catch (e) {
+      return _unauthorized(e.message);
+    }
+    final String email;
+    try {
+      var body = await req.readAsString();
+      // Not `!`: a request without the field is a bad request, not a crash.
+      email = Uri.splitQueryString(body)['email']?.trim() ?? '';
+    } on ArgumentError {
+      // What `Uri.splitQueryString` raises on a percent-escape it cannot
+      // decode. Answered rather than allowed to escape: a body somebody
+      // typed wrong is a bad request, and letting it out of the handler
+      // reported it as this server having broken.
+      return _badRequest('malformed request body');
+    }
     if (email.isEmpty) {
       return _badRequest('email is required');
     }
@@ -909,12 +942,6 @@ class App {
           'recorded as the address it publishes under, so it has to be a '
           'full one — an @ and a domain with a dot in it. A single-label '
           'name like "ops@intranet" is refused for that reason');
-    }
-    final String operatorEmail;
-    try {
-      operatorEmail = await _getUploaderEmail(req);
-    } on AuthException catch (e) {
-      return _unauthorized(e.message);
     }
     var package = await metaStore.queryPackage(name);
     if (package == null) {
@@ -938,22 +965,24 @@ class App {
   @Route.delete('/api/packages/<name>/uploaders/<email>')
   Future<shelf.Response> removeUploader(
       shelf.Request req, String name, String email) async {
-    try {
-      email = Uri.decodeComponent(email);
-    } on FormatException {
-      // Defensive rather than a fix for anything reachable today: every
-      // malformed escape tried here is rejected by `Uri.parse` inside
-      // shelf's own `Request`, so nothing gets this far. Kept because the
-      // decode happens before any credential is checked, `removeVersion`
-      // has always guarded its identical one, and a lenient parser in some
-      // later shelf would make this an unauthenticated 500.
-      return _badRequest('malformed uploader address');
-    }
     final String operatorEmail;
     try {
       operatorEmail = await _getUploaderEmail(req);
     } on AuthException catch (e) {
       return _unauthorized(e.message);
+    }
+    try {
+      email = Uri.decodeComponent(email);
+    } on FormatException {
+      // Defensive rather than a fix for anything reachable today: every
+      // malformed escape tried here is rejected by `Uri.parse` inside
+      // shelf's own `Request`, so nothing gets this far. Kept because
+      // `removeVersion` has always guarded its identical one, and a lenient
+      // parser in some later shelf would otherwise make this a 500. Below
+      // the credential check, like the ones on `addUploader`: what the
+      // caller sent is not this server's business until it knows who they
+      // are.
+      return _badRequest('malformed uploader address');
     }
     var package = await metaStore.queryPackage(name);
     if (package == null) {
@@ -975,6 +1004,19 @@ class App {
     if (stored.isEmpty) {
       return _badRequest('email not uploader');
     }
+    // Refused rather than repaired. Taking every spelling means the last two
+    // entries can be one person — `Alice@Example.org` and
+    // `alice@example.org`, the pair the old literal-compare write path
+    // produced, so the oldest packages are the likeliest to hold it — and
+    // emptying the list locks the package: `_isUploader` then answers no to
+    // everybody, so nobody can publish to it, delete from it, or add an
+    // uploader back, and only an edit to the Mongo document undoes that.
+    if (stored.length == package.uploaders!.length) {
+      return _badRequest('a package must keep at least one uploader: '
+          'removing this one would leave nobody able to publish to '
+          '"$name", and there is no way to add an uploader back to a '
+          'package that has none');
+    }
 
     for (var entry in stored) {
       await metaStore.removeUploader(name, entry);
@@ -985,18 +1027,21 @@ class App {
   @Route.delete('/api/packages/<name>/versions/<version>')
   Future<shelf.Response> removeVersion(
       shelf.Request req, String name, String version) async {
-    try {
-      version = Uri.decodeComponent(version);
-    } catch (err) {
-      print(err);
-    }
-
     final String operatorEmail;
     try {
       operatorEmail = await _getUploaderEmail(req);
     } on AuthException catch (e) {
       return _unauthorized(e.message);
     }
+    // Below the credential check, like the decode on `removeUploader`.
+    // Nothing was leaking here — the catch swallows and answers nothing —
+    // but the three state-changing routes now read the same way round.
+    try {
+      version = Uri.decodeComponent(version);
+    } catch (err) {
+      print(err);
+    }
+
     var package = await metaStore.queryPackage(name);
 
     if (package == null) {
