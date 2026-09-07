@@ -81,6 +81,36 @@ class AuthConfig {
   /// as unvalidatable. Provider downtime must not look like a revocation.
   final int revalidateMaxFailures;
 
+  /// How long an accepted credential may be answered again from memory
+  /// before the account behind it is read afresh (`--auth-credential-cache`).
+  ///
+  /// Resolving a bearer credential costs two store reads — the token row and
+  /// the owner's account — and with [protectPubApi] one `dart pub get` over
+  /// a workspace makes hundreds of gated requests. This is how long the
+  /// answer to an *accepted* one may stand. Refusals are never remembered,
+  /// so an account blocked between two requests stops working on the next.
+  ///
+  /// Deliberately single-digit seconds by default. It is short enough that
+  /// nothing a person does — blocking an account, revoking a token — is
+  /// perceptibly delayed by it, and long enough to collapse the burst that
+  /// one command produces. Zero turns it off entirely, which is why the flag
+  /// exists at all: an operator who would rather pay two reads per request
+  /// than hold any answer in memory can say so.
+  ///
+  /// [validate] refuses a value above [revalidateInterval]. Past that it
+  /// would be holding an answer for longer than the interval that defines
+  /// how quickly a revocation upstream lands, which is a promise made in
+  /// that flag's own help text.
+  final Duration credentialCache;
+
+  /// Whether an operator stated [credentialCache] rather than taking the
+  /// default. Only [validate] reads it, to refuse the flag on a server with
+  /// no authentication to cache answers about.
+  final bool credentialCacheStated;
+
+  /// The default for [credentialCache].
+  static const defaultCredentialCache = Duration(seconds: 5);
+
   /// How long an expired or revoked token is kept before the sweep drops it.
   ///
   /// Long enough that whoever presents one is told which it was, rather than
@@ -165,7 +195,10 @@ class AuthConfig {
     this.devOrigins = const [],
     bool? publicBadges,
     this.protectPubApi = false,
-  }) : publicBadges = publicBadges ?? !protectPubApi;
+    Duration? credentialCache,
+  })  : publicBadges = publicBadges ?? !protectPubApi,
+        credentialCache = credentialCache ?? defaultCredentialCache,
+        credentialCacheStated = credentialCache != null;
 
   /// A config with the feature switched off. Used when `--auth` is absent.
   ///
@@ -180,6 +213,7 @@ class AuthConfig {
     bool protectPubApi = false,
     bool? publicBadges,
     List<String> devOrigins = const [],
+    Duration? credentialCache,
   }) =>
       AuthConfig(
         enabled: false,
@@ -191,6 +225,7 @@ class AuthConfig {
         protectPubApi: protectPubApi,
         publicBadges: publicBadges,
         devOrigins: devOrigins,
+        credentialCache: credentialCache,
       );
 
   /// [value] as a browser spells it in the `Origin` header, or null when it
@@ -300,6 +335,14 @@ class AuthConfig {
           '--auth-dev-origins needs --auth: without it the answer to every '
               'cross-origin read is a wildcard with credentials refused, and '
               'the origins named here are never consulted',
+        // Same category as the origins above: without `--auth` there is no
+        // `AuthService`, so no credential is ever resolved against an
+        // account and there is nothing to remember. Refused rather than
+        // ignored, so that an operator tuning this does not spend an
+        // afternoon on a flag that was never consulted.
+        if (credentialCacheStated)
+          '--auth-credential-cache needs --auth: without it no credential is '
+              'resolved against an account, so there is no answer to hold',
       ];
     }
     var errors = <String>[];
@@ -346,6 +389,18 @@ class AuthConfig {
     }
     if (sessionIdle > sessionTtl) {
       errors.add('--auth-session-idle must not exceed --auth-session-ttl');
+    }
+    if (credentialCache > revalidateInterval) {
+      // The whole argument for holding an answer at all is that nothing
+      // consults the identity provider inside `--auth-revalidate-interval`
+      // anyway, so a cache no longer than it changes nothing about how
+      // quickly a revocation upstream lands. Past it the cache would be the
+      // thing deciding that, against what the interval's own help text
+      // promises — and, for a credential, against the only bound there is.
+      errors.add('--auth-credential-cache must not exceed '
+          '--auth-revalidate-interval: an accepted credential would be '
+          'served from memory for longer than the interval that decides how '
+          'quickly a revocation on the identity provider takes effect');
     }
     return errors;
   }

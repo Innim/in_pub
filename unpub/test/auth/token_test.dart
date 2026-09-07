@@ -33,6 +33,14 @@ void main() {
         // Revalidation has its own tests; keep it out of the way here.
         revalidateInterval: const Duration(days: 365),
         revalidateHard: const Duration(days: 365),
+        // So does the resolution cache — `credential_cache_test.dart`. These
+        // cases reach into the store to change an account and then present
+        // the token again, which is a thing no caller in this process does:
+        // a block goes through the account API or the revalidator, and both
+        // drop what is remembered about the account as they go. Left on,
+        // every one of them would be asserting the timing of the cache
+        // rather than the rule it is checking.
+        credentialCache: Duration.zero,
       );
 
   void build([AuthConfig? cfg, MemoryAuthStore? withStore]) {

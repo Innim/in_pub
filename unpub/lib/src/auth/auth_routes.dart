@@ -64,6 +64,15 @@ class AuthRoutes {
     this.isPackageUploader,
   });
 
+  /// Told when an administrator withdraws access from an account, so that
+  /// anything holding an answer about it can drop it.
+  ///
+  /// `AuthService` points this at its credential caches — the same hook
+  /// `UserValidator` is given, for the refusals it reaches on its own
+  /// schedule. Settable rather than constructed with, because it points back
+  /// at the object that builds this one.
+  void Function(String userId)? onAccessWithdrawn;
+
   /// Built once. A getter here compiled fourteen route patterns afresh on
   /// every request that reached `/auth/`.
   late final Router router = Router()
@@ -864,7 +873,29 @@ class AuthRoutes {
     // revocation into the log that nobody performed — the same shape as the
     // uploader routes that used to say "uploader added" over an update
     // matching no document.
-    if (!await store.revokeToken(target.id, 'revoked from the account page')) {
+    // Dropped from the resolution cache on both sides of the write, which is
+    // one map removal and closes two different failures.
+    //
+    // Before, for the write that never lands: a store fault here would
+    // otherwise leave this process serving the token from memory for the
+    // rest of the window, from a request whose whole purpose was to stop it.
+    //
+    // After, for the request that raced it: a bearer request already in
+    // flight when the drop above ran reads a row that is still live, is
+    // legitimately accepted, and would write a *fresh* acceptance behind us
+    // — so the token would go on working for a full window despite a
+    // revocation that has committed. `TokenService` refuses that write for a
+    // resolution that began before either drop; this second drop covers the
+    // one that finished in between.
+    //
+    // Both paths this handler serves are covered, the owner revoking their
+    // own and an administrator revoking a service token, because both arrive
+    // here.
+    tokens.forgetToken(target.id);
+    var revoked =
+        await store.revokeToken(target.id, 'revoked from the account page');
+    tokens.forgetToken(target.id);
+    if (!revoked) {
       return _apiError('That token has already been revoked.',
           status: HttpStatus.conflict, cookies: guard.result!.cookies);
     }
@@ -1081,15 +1112,39 @@ class AuthRoutes {
 
     switch (action) {
       case 'end-sessions':
+        // No cache to drop, and deliberately so. This ends browser sessions;
+        // it withdraws nothing from the account, which stays active and
+        // whose tokens go on working — that is the documented difference
+        // between this action and a block. Sessions are not resolved through
+        // either credential cache in the first place.
         var ended = await store.revokeUserSessions(
             targetId, 'ended by an administrator');
         _log.info('${actor.id} ended $ended session(s) for $targetId');
       case 'block':
+        // Their tokens are not revoked by this — deliberately, so that
+        // unblocking restores them rather than costing everybody a reissue —
+        // so the only thing that stops one is the owner check the resolution
+        // cache is allowed to skip. Dropped first, and before the writes, so
+        // that a block whose second write fails has still stopped the
+        // credentials this process was holding an answer for.
+        //
+        // Through the hook rather than straight to `tokens`, because a
+        // blocked account can also be reached by the legacy Google
+        // credential, whose answers are remembered elsewhere. Blocking has
+        // to stop both.
+        onAccessWithdrawn?.call(targetId);
         await store.setUserStatus(targetId, UserStatus.blockedLocal,
             reason: 'Access to this package repository has been withdrawn by '
                 'an administrator.');
         var ended = await store.revokeUserSessions(
             targetId, 'blocked by an administrator');
+        // Again, now that the block is on the record. The call above is for
+        // a write that fails; this one is for a bearer request that was
+        // already resolving when it ran — that request read a live account,
+        // was rightly accepted, and would otherwise write a fresh acceptance
+        // behind the block. See `TokenService.resolve`, which also refuses
+        // the write for anything still in flight across both of these.
+        onAccessWithdrawn?.call(targetId);
         _log.info('${actor.id} blocked $targetId and ended $ended session(s)');
       case 'unblock':
         if (target.status == UserStatus.needsSignIn) {
@@ -1112,6 +1167,12 @@ class AuthRoutes {
         // Back to active, but with no confirmation on record: the next
         // request makes them prove themselves against the provider before
         // anything is served.
+        //
+        // Nothing to drop from the caches: only acceptances are ever kept,
+        // so there is no stale refusal to clear, and an acceptance for an
+        // account that was blocked cannot exist — the block dropped it, and
+        // every resolution since has been refused. Restoring access is also
+        // the one direction where being late would be harmless.
         await store.setUserStatus(targetId, UserStatus.active);
         await store.recordValidation(targetId,
             validatedAt: DateTime.fromMillisecondsSinceEpoch(0), failures: 0);

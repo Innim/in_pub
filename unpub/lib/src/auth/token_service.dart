@@ -93,6 +93,41 @@ class TokenService {
   /// with the same token and none of them need their own write.
   static const _touchInterval = Duration(minutes: 5);
 
+  /// Acceptances this process may answer again without going to the store.
+  /// Keyed by the hash of the whole presented value. See [resolve].
+  final _accepted = <String, _Accepted>{};
+
+  /// How many times something has been withdrawn from this cache.
+  ///
+  /// Not a statistic. Dropping an entry when a revocation commits closes the
+  /// obvious half of the race and leaves the other half open: a request that
+  /// was already resolving reads a row that is still live, is legitimately
+  /// accepted, and writes its acceptance *after* the drop — handing a token
+  /// that has just been revoked another full window. So a resolution notes
+  /// the count it began in and refuses to write if it has moved. See
+  /// [_remember].
+  ///
+  /// Deliberately one counter rather than per token or per account. Being
+  /// coarse costs an uncached resolution for whoever happened to be in
+  /// flight during a revoke; being precise costs a second structure that has
+  /// to be right about a race, which is the kind of bookkeeping this whole
+  /// change exists to avoid. Withdrawals are human-scale events.
+  int _withdrawals = 0;
+
+  /// At most this many remembered acceptances.
+  ///
+  /// The keys are hashes of values a caller supplies, so the size of this
+  /// map has to be somebody's decision rather than a consequence of who
+  /// turns up. Only an *accepted* credential is ever written here, which
+  /// already bounds it by the number of live tokens the store holds — but
+  /// that number belongs to the deployment and a fleet minting one token per
+  /// job can make it large, so it is bounded here too. Reached only when
+  /// that many distinct tokens are in use within one [AuthConfig.credentialCache]
+  /// window, and the answer then is to drop what has expired and, failing
+  /// that, to start over: entries live seconds, so an empty map costs one
+  /// extra pair of reads per token and nothing more.
+  static const _cacheLimit = 1024;
+
   TokenService({
     required this.config,
     required this.store,
@@ -210,6 +245,45 @@ class TokenService {
   /// identity provider — takes their tokens with it, without anything having
   /// to hunt them down. That also means unblocking restores them, which is
   /// why they are not revoked outright.
+  ///
+  /// That check costs two store reads — the token row and the account — and
+  /// it used to be paid on every gated request. With
+  /// `--auth-protect-pub-api` one `dart pub get` over a workspace makes
+  /// hundreds of them, so an accepted answer is held for
+  /// [AuthConfig.credentialCache] (seconds, and zero turns it off). What is
+  /// and is not remembered is the whole of the design:
+  ///
+  /// * **Only acceptances.** A refusal is never written down here. Two
+  ///   reasons, and either would be enough. An account blocked between two
+  ///   requests has to stop working on the next one, which a remembered
+  ///   refusal would delay exactly as much as it delays nothing else worth
+  ///   having; and a refusal is the one answer an unauthenticated caller can
+  ///   provoke at will, so remembering refusals would let anybody fill this
+  ///   map with values they invented.
+  /// * **Nothing inconclusive.** A store fault does not reach the write
+  ///   below: every path that ends in a refusal — including
+  ///   [ValidationResult.inconclusive], which says only that this server
+  ///   could not ask — returns before it, and an exception from the store
+  ///   leaves by the same door. So a momentary database fault is never
+  ///   memoised as either an accept or a refuse.
+  /// * **Nothing the validator has since taken back.** `UserValidator`
+  ///   reaches refusals on its own schedule — a background revalidation
+  ///   inside the soft window, or the sweep — and records them in a note map
+  ///   rather than on the account. It calls [forgetUser] when it does, so an
+  ///   acceptance remembered here can never contradict that note.
+  /// * **Revocation is not left to the clock.** Revoking a token or blocking
+  ///   an account through the account API drops the entry outright, so the
+  ///   very next request fails. It is dropped twice — before the store write
+  ///   and again after it — and a resolution that was already in flight is
+  ///   refused the write altogether; between them those cover a request
+  ///   landing on either side of the write. See [_withdrawals]. The window
+  ///   this cache opens is for the paths nothing in this process sees: a row
+  ///   edited in the database directly, or a second server sharing it. Those
+  ///   are bounded by the TTL and by nothing else, which is why the TTL is
+  ///   seconds.
+  ///
+  /// `lastUsedAt` keeps being recorded across a hit — see [_touch], which is
+  /// called on both paths.
   Future<TokenResolution> resolve(String value, {String? ip}) async {
     if (!looksLikeOurs(value)) return const TokenResolution.notOurs();
 
@@ -220,6 +294,30 @@ class TokenService {
     }
     var id = body.substring(0, cut);
     var secret = body.substring(cut + 1);
+
+    var now = DateTime.now();
+    // The generation this resolution starts in. Everything below awaits —
+    // two store reads and a revalidation — and a revoke or a block can land
+    // in any of those gaps. See [_withdrawals].
+    var asOf = _withdrawals;
+    // Keyed on the whole value rather than on the id, so the cache cannot
+    // stand in for the secret check below: a value carrying the wrong secret
+    // hashes to a different key and misses, whoever else has presented the
+    // real one.
+    var key = CryptoBox.hash(value);
+    var remembered = _accepted[key];
+    if (remembered != null) {
+      // Expiry is the one property of the record that can change on its own
+      // — no request, no administrator, just the clock — so it is re-checked
+      // rather than trusted from the read that made this entry.
+      if (remembered.expiresAt.isAfter(now) &&
+          !remembered.token.isExpired(now)) {
+        await _touchRemembered(remembered, now, ip);
+        return TokenResolution.accepted(remembered.user,
+            token: remembered.token);
+      }
+      _accepted.remove(key);
+    }
 
     var token = await store.getToken(id);
     if (token == null) {
@@ -239,7 +337,6 @@ class TokenService {
           'this token has been revoked${token.revokedReason == null ? '' : ' (${token.revokedReason})'}');
     }
 
-    var now = DateTime.now();
     if (token.isExpired(now)) {
       return const TokenResolution.refused(
           'this token has expired; create a new one');
@@ -288,17 +385,138 @@ class TokenService {
           'name');
     }
 
-    await _touch(token, now, ip);
+    var lastUsedAt = token.lastUsedAt;
+    if (await _touch(token.id, lastUsedAt, now, ip)) lastUsedAt = now;
+
+    _remember(key, user, token, lastUsedAt, now, asOf);
     return TokenResolution.accepted(user, token: token);
   }
 
-  Future<void> _touch(StoredToken token, DateTime now, String? ip) async {
+  /// Records this use, unless one was recorded recently enough.
+  ///
+  /// [lastUsedAt] is when this token was last written down: off the record
+  /// on the path that read it, and off [_Accepted.lastUsedAt] on a cache
+  /// hit. Answers whether it wrote.
+  Future<bool> _touch(
+      String id, DateTime? lastUsedAt, DateTime now, String? ip) async {
     // Purely by the clock. Letting a changed address force a write looks
     // thorough until a CI fleet shares one token behind a proxy: every
     // request then carries a different address, and resolving two hundred
     // dependencies costs two hundred writes on the request path.
-    var last = token.lastUsedAt;
-    if (last != null && now.difference(last) < _touchInterval) return;
-    await store.touchToken(token.id, now, ip: ip);
+    if (lastUsedAt != null && now.difference(lastUsedAt) < _touchInterval) {
+      return false;
+    }
+    await store.touchToken(id, now, ip: ip);
+    return true;
   }
+
+  /// The same, for a request answered from [_accepted].
+  ///
+  /// A cache hit must not stop the account screen's "last used" column
+  /// moving: it is what somebody looks at to decide whether a token is still
+  /// in use before revoking it, and a credential that had quietly stopped
+  /// being recorded would read as abandoned while a CI fleet used it every
+  /// minute.
+  ///
+  /// The throttle is kept, and kept off the entry rather than off the
+  /// snapshot it holds. That record is frozen at the moment it was read, so
+  /// its own `lastUsedAt` would go on naming the same instant for as long as
+  /// the entry lives — and once the interval had passed, every request would
+  /// write. The entry remembers what this process actually wrote instead, so
+  /// the write happens exactly as often as it did before there was a cache.
+  Future<void> _touchRemembered(
+      _Accepted entry, DateTime now, String? ip) async {
+    if (await _touch(entry.token.id, entry.lastUsedAt, now, ip)) {
+      entry.lastUsedAt = now;
+    }
+  }
+
+  void _remember(String key, AuthenticatedUser user, StoredToken token,
+      DateTime? lastUsedAt, DateTime now, int asOf) {
+    var ttl = config.credentialCache;
+    if (ttl <= Duration.zero) return;
+    // Something was withdrawn while this resolution was in flight, so this
+    // answer predates a decision that has since been taken. The answer
+    // itself was correct when it was reached — the row was live — which is
+    // precisely why it must not be kept: the request is served, and the next
+    // one goes back to the store.
+    if (_withdrawals != asOf) return;
+    _accepted[key] = _Accepted(
+      user: user,
+      token: token,
+      lastUsedAt: lastUsedAt,
+      expiresAt: now.add(ttl),
+    );
+    if (_accepted.length > _cacheLimit) _prune(now);
+  }
+
+  void _prune(DateTime now) {
+    _accepted.removeWhere((_, e) => !e.expiresAt.isAfter(now));
+    // Still over the limit means that many tokens are genuinely in use at
+    // once and dropping expired entries freed nothing. Start over rather
+    // than grow without bound; entries only live seconds.
+    if (_accepted.length > _cacheLimit) _accepted.clear();
+  }
+
+  /// Forgets any remembered acceptance of the token [id], so that the next
+  /// request presenting it is answered from the store.
+  ///
+  /// Called when a token is revoked. Revocation is the one thing this cache
+  /// must not delay, and this process is where both the revocation and the
+  /// remembered answer live, so it does not have to wait for the clock.
+  ///
+  /// Only for this process, honestly. A second server sharing the database
+  /// has its own map and learns of the revocation when its entry expires,
+  /// which is what bounds the TTL to seconds.
+  void forgetToken(String id) {
+    _withdrawals++;
+    _accepted.removeWhere((_, e) => e.token.id == id);
+  }
+
+  /// The same for every personal token belonging to [userId].
+  ///
+  /// Blocking an account has to stop its tokens on the very next request,
+  /// not at the end of the window: the tokens are not revoked when somebody
+  /// is blocked — that is deliberate, so unblocking restores them — so the
+  /// only thing that stops them is the owner check this cache skips.
+  ///
+  /// Service tokens are untouched, and belong to nobody: `userId` is null on
+  /// them, which is the whole point of the kind.
+  void forgetUser(String userId) {
+    _withdrawals++;
+    _accepted.removeWhere((_, e) => e.token.userId == userId);
+  }
+
+  /// Forgets everything. For shutdown, and for a test that wants the next
+  /// resolution to go to the store.
+  void forgetEverything() {
+    _withdrawals++;
+    _accepted.clear();
+  }
+}
+
+/// An acceptance this process may answer again without reading the store.
+///
+/// Only acceptances are ever kept; [TokenService.resolve] says why.
+class _Accepted {
+  /// Who the token speaks for, as the account stood when it was checked.
+  final AuthenticatedUser user;
+
+  /// The record as it was read. Its expiry is re-checked on every hit;
+  /// nothing else about it can change within the entry's short life without
+  /// something in this process dropping the entry outright.
+  final StoredToken token;
+
+  /// When this token's use was last written down. Mutable, and deliberately
+  /// not read off [token]: see [TokenService._touchRemembered].
+  DateTime? lastUsedAt;
+
+  final DateTime expiresAt;
+
+  _Accepted({
+    required this.user,
+    required this.token,
+    required this.lastUsedAt,
+    required this.expiresAt,
+  });
 }

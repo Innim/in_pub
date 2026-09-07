@@ -99,6 +99,25 @@ class UserValidator {
   /// for what counts as that, and what deliberately does not.
   final _refusals = <String, _Refusal>{};
 
+  /// Told whenever this class decides an account may no longer be served, so
+  /// that anything holding an answer about it can drop that answer.
+  ///
+  /// `AuthService` points this at the credential caches. They exist because
+  /// resolving a bearer credential costs two store reads and one
+  /// `dart pub get` makes hundreds of them; what they must never do is go on
+  /// serving an account this class has already refused. The refusals that
+  /// need saying out loud are precisely the ones nobody is waiting for: a
+  /// background revalidation inside the soft window, or the sweep, reaches a
+  /// verdict on its own schedule and writes it into [_refusals] rather than
+  /// onto the account — so a cache keyed on the credential would never see
+  /// it, and would keep answering yes until its own clock ran out.
+  ///
+  /// Deliberately not a store write and deliberately not durable: it drops
+  /// something this process is holding in memory, which is the only thing it
+  /// can honestly promise. A second server sharing the database has its own
+  /// caches and reaches the same verdict on its own sweep.
+  void Function(String userId)? onAccessWithdrawn;
+
   Timer? _timer;
 
   UserValidator({
@@ -529,9 +548,17 @@ class UserValidator {
       }
       _log.info('${user.id} has nothing left to revalidate with; ending '
           'their sessions and asking them to sign in again');
+      // A prompt rather than a withdrawal, but `ensureValid` refuses on it
+      // all the same — `needsSignIn` is not `isActive` — so a cache still
+      // holding an acceptance would answer for an account this server has
+      // just decided it cannot vouch for.
+      onAccessWithdrawn?.call(user.id);
       await store.setUserStatus(user.id, UserStatus.needsSignIn,
           reason: 'please sign in again to confirm your account');
       await store.revokeUserSessions(user.id, 'please sign in again');
+      // And again after the writes, for the request that was resolving
+      // across them — the same pairing as `_refuse`.
+      onAccessWithdrawn?.call(user.id);
       return const _Verdict.unconfirmed();
     }
 
@@ -651,6 +678,21 @@ class UserValidator {
   /// its credential goes on being refused for as long as this process runs.
   Future<_Verdict> _refuse(StoredUser user, String reason,
       {required bool interactive}) async {
+    // First, before either branch and before any write. Whatever else this
+    // refusal does or fails to do, nothing in this process may go on
+    // answering for the account out of a cache — and doing it here rather
+    // than after the writes means a store fault on one of them cannot leave
+    // a remembered acceptance standing behind a verdict already reached.
+    //
+    // The credential branch below needs nothing further: it writes its note
+    // synchronously, with no await between this call and the note, so
+    // nothing can interleave. What can still interleave is the *request*
+    // that started the check — a background revalidation is fired unawaited
+    // by a request that then goes on to cache its own acceptance — and that
+    // is closed at the other end, by `TokenService.resolve` refusing to
+    // write for a resolution that began before this call. The interactive
+    // branch has two awaits and calls this again after them.
+    onAccessWithdrawn?.call(user.id);
     if (!interactive) {
       _refusals[user.id] = _Refusal(reason,
           status: user.status, confirmedAt: user.lastValidatedAt);
@@ -663,6 +705,10 @@ class UserValidator {
     await store.setUserStatus(user.id, UserStatus.blockedUpstream,
         reason: reason);
     var ended = await store.revokeUserSessions(user.id, reason);
+    // Again, now that the block is written. A request that was resolving
+    // across those two awaits read an account that was still active and
+    // would otherwise cache that answer behind the block.
+    onAccessWithdrawn?.call(user.id);
     _log.info('ended $ended session(s) for ${user.id}');
     return _Verdict.refused(reason);
   }

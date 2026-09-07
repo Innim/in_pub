@@ -253,6 +253,18 @@ void _addAuthOptions(ArgParser parser) {
       help: 'Consecutive failed re-checks after which a user is refused,\n'
           'whichever comes first with --auth-revalidate-hard.',
       defaultsTo: '3');
+  parser.addOption('auth-credential-cache',
+      help: 'How long an accepted bearer credential may be answered again\n'
+          'from memory before the account behind it is read afresh.\n'
+          'Refusals are never held, and revoking a token or blocking an\n'
+          'account drops what this server remembers about it at once, so\n'
+          'this bounds only what another process changes behind its back.\n'
+          'Must not exceed --auth-revalidate-interval. 0 turns it off.\n'
+          'Defaults to 5s.',
+      // Left unstated rather than defaulted here, so the config can tell an
+      // operator who asked for this without --auth — where nothing resolves
+      // a credential against an account — from one who never mentioned it.
+      defaultsTo: null);
   parser.addOption('auth-token-retention',
       help: 'How long an expired or revoked token is kept before the sweep\n'
           'drops it. Until then whoever presents one is told which of the\n'
@@ -304,7 +316,13 @@ in_pub.AuthConfig _authConfigFrom(ArgResults results) {
         // consulted without `--auth`, so a misspelled one is never reported,
         // and README's "an entry that is not an origin stops the server" was
         // true only half the time.
-        devOrigins: _csv(results['auth-dev-origins'] as String?));
+        devOrigins: _csv(results['auth-dev-origins'] as String?),
+        // Carried through for the same reason as the two above: without
+        // `--auth` nothing resolves a credential against an account, so
+        // there is no answer to hold and the flag would silently do nothing.
+        credentialCache: _optionalDuration(
+            results['auth-credential-cache'] as String?,
+            'auth-credential-cache'));
   }
 
   final env = Platform.environment;
@@ -363,6 +381,10 @@ in_pub.AuthConfig _authConfigFrom(ArgResults results) {
         3,
     tokenRetention: _duration(
         results['auth-token-retention'] as String?, 'auth-token-retention'),
+    // Null when unstated, so the config supplies its own default and can
+    // still tell the two apart.
+    credentialCache: _optionalDuration(
+        results['auth-credential-cache'] as String?, 'auth-credential-cache'),
     rpInitiatedLogout: results['auth-rp-logout'] as bool,
     insecureCookie: results['auth-insecure-cookie'] as bool,
     devOrigins: _csv(results['auth-dev-origins'] as String?),
@@ -377,6 +399,13 @@ List<String> _csv(String? value) => (value ?? '')
     .map((s) => s.trim())
     .where((s) => s.isNotEmpty)
     .toList();
+
+/// The same, for a flag that has no default: null when it was never stated.
+///
+/// A stated value still has to parse, so a typo stops the server rather than
+/// falling back to the default and reading as though it had been honoured.
+Duration? _optionalDuration(String? value, String flag) =>
+    (value == null || value.trim().isEmpty) ? null : _duration(value, flag);
 
 /// Parses a duration written as `30s`, `10m`, `24h` or `7d`. A bare number is
 /// read as seconds.

@@ -1,5 +1,8 @@
 ## Unreleased
 
+### Added
+- `--auth-credential-cache`, how long an accepted bearer credential may be answered again from memory before the account behind it is read afresh. Defaults to `5s`; `0` turns it off. Checking a credential costs two database reads and one `dart pub get` over a workspace makes hundreds of gated requests. Refusals are never held, and revoking a token, blocking an account or any refusal the revalidator reaches drops what this server remembers at once, so those land on the very next request; the window bounds only what changes behind this process's back.
+
 ### Changed
 - Generated API documentation accepts a bearer token as well as a browser session, so a CI job or a docs mirror can read it. It stays gated whenever `--auth` is on, with or without `--auth-protect-pub-api`.
 - Three queries on the sign-in and sweep paths no longer scan their whole collection: the session sweep and the service-token address lookup are answered from indexes, and the clash warning a sign-in logs is no longer waited for. Token documents gain a folded `emailKey`, and `--auth-session-idle` is applied in one place instead of three.
@@ -16,6 +19,7 @@
 - The uploader and publish routes authenticate before they read or validate anything the caller sent, and an `Authorization` header carrying a scheme other than `bearer` is refused rather than having its value handed to Google's `tokeninfo` — a proxy adding Basic auth in front of this server sent the password there.
 
 ### Breaking
+- `AuthConfig` gains `credentialCache`, and `UserValidator` and `AuthRoutes` gain an `onAccessWithdrawn` callback the credential cache is wired to. Anyone constructing these directly is unaffected by the defaults; anyone wrapping them has to forward the callback or a withdrawal will not reach the cache.
 - `AuthStore.listUserSessions` now takes the idle window, so the account screen and the administration screen stop deriving "live session" from different rules. Anyone with their own `AuthStore` implementation has to drop sessions unused for longer than it.
 - `AuthStore.rotateSession` no longer takes `prevSecretHash`: the expected secret is the one that stays acceptable, and every other choice strands a cookie a client may still hold. Anyone with their own `AuthStore` implementation has to drop the parameter.
 

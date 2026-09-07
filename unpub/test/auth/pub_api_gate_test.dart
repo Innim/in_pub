@@ -47,6 +47,14 @@ void main() {
         publicBadges: publicBadges,
         revalidateInterval: const Duration(days: 365),
         revalidateHard: const Duration(days: 365),
+        // Off, for the same reason revalidation is pinned open above: these
+        // cases change an account by writing to the store and then present
+        // the credential again, which is what a *second* server sharing the
+        // database looks like rather than anything this process does. The
+        // cache's own behaviour — including a block through the account API
+        // stopping a token on the very next request — is in
+        // `credential_cache_test.dart`.
+        credentialCache: Duration.zero,
       ),
       store: store,
       provider: provider = FakeIdentityProvider(),
