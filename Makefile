@@ -11,4 +11,4 @@ build:
 	cd unpub_web &&\
 	fvm dart run build_runner build --release --delete-conflicting-outputs --output=web:build
 	fvm dart unpub/tool/pre_publish.dart
-	fvm dart format **/*.dart
+	fvm dart format .
