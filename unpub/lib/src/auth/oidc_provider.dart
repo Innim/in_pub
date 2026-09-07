@@ -589,7 +589,25 @@ class OidcProvider implements IdentityProvider {
   /// name under one of several keys.
   static List<String> _parseGroups(Object value) {
     if (value is String) {
-      return value.split(RegExp(r'[,\s]+')).where((s) => s.isNotEmpty).toList();
+      // Comma only, and each part trimmed. Splitting on whitespace as well
+      // tore `Pub Admins` into `Pub` and `Admins`: a member whose only group
+      // has a space in it was denied, and either fragment could match an
+      // --auth-allowed-groups entry that happened to equal it.
+      //
+      // Narrowing the delimiter set breaks nothing real. Every provider with
+      // a native groups claim sends an array — Keycloak, Okta, Entra ID and
+      // the Shibboleth bridges; Google has no such claim at all. A delimited
+      // string reaches this branch from a gateway that flattened one, and the
+      // documented defaults there are commas (mod_auth_openidc's
+      // OIDCClaimDelimiter, PingFederate's attribute contracts). Space
+      // delimiting is the `scope` convention (RFC 6749 §3.3), which is a
+      // different claim. ADFS's quirk of sending a lone group as a bare
+      // string now survives intact instead of arriving in pieces.
+      return value
+          .split(',')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
     }
     if (value is! List) return const [];
 

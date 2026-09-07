@@ -710,6 +710,48 @@ void main() {
       expect(store.users['user-2']!.status, UserStatus.active);
     });
 
+    test('cannot unblock an account waiting for its owner to sign in',
+        () async {
+      // `needsSignIn` is not a block: nothing is left to re-check the account
+      // with, so the forced revalidation an unblock writes rediscovers that
+      // on the very next request, puts `needsSignIn` back and ends the
+      // sessions a second time. The administrator saw the status flip to
+      // active and flip straight back, and the owner was signed out again.
+      var adminJar = await signIn();
+      provider.profile = const AuthenticatedUser(
+          id: 'user-2', email: 'other@example.org', displayName: 'Other');
+      await signIn();
+      await store.setUserStatus('user-2', UserStatus.needsSignIn,
+          reason: 'Please sign in again.');
+
+      var view = await adminView(adminJar);
+      var res =
+          await act(adminJar, view['csrfToken'] as String, 'user-2', 'unblock');
+
+      expect(res.statusCode, HttpStatus.badRequest);
+      expect(
+          json.decode(await res.readAsString())['error'], contains('sign in'));
+      expect(store.users['user-2']!.status, UserStatus.needsSignIn);
+    });
+
+    test('an account blocked by an administrator can still be unblocked',
+        () async {
+      // The refusal above must not have swallowed the case it was written
+      // beside.
+      var adminJar = await signIn();
+      provider.profile = const AuthenticatedUser(
+          id: 'user-2', email: 'other@example.org', displayName: 'Other');
+      await signIn();
+
+      var view = await adminView(adminJar);
+      var csrf = view['csrfToken'] as String;
+      await act(adminJar, csrf, 'user-2', 'block');
+      var res = await act(adminJar, csrf, 'user-2', 'unblock');
+
+      expect(res.statusCode, HttpStatus.ok);
+      expect(store.users['user-2']!.status, UserStatus.active);
+    });
+
     test('an action answers with the refreshed view', () async {
       // So the screen never has to guess what the change did.
       var adminJar = await signIn();

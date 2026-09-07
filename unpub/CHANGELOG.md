@@ -1,6 +1,9 @@
 ## Unreleased
 
 ### Fixed
+- A group name with a space in it is no longer split into two: a `groups` claim sent as a delimited string is separated on commas alone, which is what the gateways that flatten one actually use.
+- Unblocking an account that is waiting for its owner to sign in is refused rather than accepted and undone by that account's next request. The web UI never offered it; the API did.
+- A shutdown that does not finish exits non-zero, and the release steps run whether the drain succeeded or not. A failed drain used to report a clean stop while leaving the database connection, the timers and the signal handlers behind.
 - A database fault while a request is being checked is answered in words instead of escaping as a bare 500: the browser gets the refusal its front end renders and `dart pub` gets the 401 it prints back, both asking for a retry, and the browser keeps its session cookie so a reload once the store recovers is all it takes. The administration screen no longer reports that a block failed when only the list of users could not be read afterwards.
 - A browser is no longer accused of holding a cloned cookie because two of its requests crossed the session-secret rotation boundary. A request that arrived on the previous secret re-issued a third one, pushing the secret already delivered to the browser out of both slots; it is now served on what it presented and nothing is written.
 - Removing the last uploader of a package is refused instead of committed: an empty uploader list left the package impossible to publish to, delete from or add an uploader back to, short of editing the database.

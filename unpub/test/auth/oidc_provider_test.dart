@@ -385,12 +385,37 @@ void main() {
       expect(user.groups, isEmpty);
     });
 
-    test('accepts groups given as a string', () async {
+    test('accepts groups given as a delimited string', () async {
+      // Comma-delimited, with the empty trailing fragment dropped and the
+      // spaces around a name trimmed off.
       var user = await provider(
               userInfo: (_) =>
-                  profile({'sub': 'user-1', 'groups': 'developers everyone'}))
+                  profile({'sub': 'user-1', 'groups': 'developers, everyone,'}))
           .userInfo('access-1');
       expect(user.groups, ['developers', 'everyone']);
+    });
+
+    test('a group name with a space in it survives a delimited string',
+        () async {
+      // Splitting on whitespace as well as commas tore `Pub Admins` into
+      // `Pub` and `Admins`: a member whose only group has a space in it was
+      // denied, and either fragment could match an --auth-allowed-groups
+      // entry that happened to equal it. No provider is documented to send a
+      // space-delimited list of group names — that is the `scope` convention.
+      var user = await provider(
+              userInfo: (_) => profile(
+                  {'sub': 'user-1', 'groups': 'Pub Admins, Site Readers'}))
+          .userInfo('access-1');
+      expect(user.groups, ['Pub Admins', 'Site Readers']);
+    });
+
+    test('a lone group sent as a bare string is one group', () async {
+      // What ADFS does for a user who is in exactly one group.
+      var user = await provider(
+              userInfo: (_) =>
+                  profile({'sub': 'user-1', 'groups': 'Pub Admins'}))
+          .userInfo('access-1');
+      expect(user.groups, ['Pub Admins']);
     });
 
     test('falls back to the username when there is no display name', () async {

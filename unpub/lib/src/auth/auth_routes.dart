@@ -1060,7 +1060,8 @@ class AuthRoutes {
     if (targetId.isEmpty) {
       return _apiError('No user was named.', cookies: guard.result!.cookies);
     }
-    if (await store.getUser(targetId) == null) {
+    var target = await store.getUser(targetId);
+    if (target == null) {
       return _apiError('That user does not exist.',
           status: HttpStatus.notFound, cookies: guard.result!.cookies);
     }
@@ -1085,6 +1086,23 @@ class AuthRoutes {
             targetId, 'blocked by an administrator');
         _log.info('${actor.id} blocked $targetId and ended $ended session(s)');
       case 'unblock':
+        if (target.status == UserStatus.needsSignIn) {
+          // `needsSignIn` is not a block, and unblocking it does not stick.
+          // The server has run out of ways to re-check the account — there
+          // is no refresh token left — so the forced revalidation below
+          // writes `needsSignIn` straight back on the very next request and
+          // ends the sessions a second time. The administrator would watch
+          // the status flip to active and flip back, and the account's owner
+          // would be signed out again for no reason they can see. Only they
+          // can clear this, by signing in. [AdminUser.status] tells clients
+          // not to offer the button; this is a public endpoint, so it has to
+          // be said here too.
+          return _apiError(
+              'That account is not blocked: it is waiting for its owner to '
+              'sign in again, which is the only thing that clears this. '
+              'Unblocking it would be undone by the next request it makes.',
+              cookies: guard.result!.cookies);
+        }
         // Back to active, but with no confirmation on record: the next
         // request makes them prove themselves against the provider before
         // anything is served.
