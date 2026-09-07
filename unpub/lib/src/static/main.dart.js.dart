@@ -1,5 +1,4 @@
-String content(Map<String, String> vars) =>
-    """(function dartProgram(){function copyProperties(a,b){var s=Object.keys(a)
+String content(Map<String, String> vars) => """(function dartProgram(){function copyProperties(a,b){var s=Object.keys(a)
 for(var r=0;r<s.length;r++){var q=s[r]
 b[q]=a[q]}}function mixinPropertiesHard(a,b){var s=Object.keys(a)
 for(var r=0;r<s.length;r++){var q=s[r]
@@ -17115,7 +17114,7 @@ n8(a){var s=this.b
 s=s==null?null:s.b
 return a.a===s},
 jB(a){switch(a.e){case"blockedLocal":return"blocked here"
-case"blockedUpstream":return"revoked by provider"
+case"blockedUpstream":return"no longer authorised"
 case"needsSignIn":return"must sign in again"
 default:return"active"}},
 bJ(a,b){return this.mb(a,b)},
@@ -17276,7 +17275,7 @@ f.c=new A.a4(new A.P(r,A.D0()),r)
 q=A.h(d,c,"p",b)
 f.q(q,"hint")
 f.gj().k(q)
-A.r(q,"Blocking someone here is independent of the identity provider: it keeps them out of this repository while their account elsewhere is untouched, and survives them signing in again. Accounts disabled on the provider are picked up on their own and show as revoked.")
+A.r(q,"Blocking someone here is independent of the identity provider: it keeps them out of this repository while their account elsewhere is untouched, and survives them signing in again. Accounts the provider stops vouching for, or whose groups no longer grant access here, are picked up on their own and show as no longer authorised, with the reason beside them.")
 p=A.h(d,c,"table",t.fF)
 f.q(p,"data-table")
 f.gj().k(p)

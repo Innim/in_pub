@@ -223,6 +223,202 @@ void main() {
           (await store.getUser('user-1'))!.status, UserStatus.blockedUpstream);
     });
 
+    test('is refused for a credential without blocking or ending sessions',
+        () async {
+      // The revocation is real and the credential is refused for it — but a
+      // `dart pub publish` from CI is no place to end the owner's browser
+      // sessions: they did not run it, may not be at a keyboard, and cannot
+      // act on the sign-in prompt that would follow. The evidence is softer
+      // than it looks, too: `invalid_grant` is also what a refresh token
+      // that was merely *spent* earns, which is what a credential check
+      // racing a rotation produces.
+      var user = await seedUser(age: const Duration(hours: 1));
+      provider.refreshError = IdentityRevokedException('invalid_grant');
+
+      var result = await validator.ensureValid(user, interactive: false);
+
+      expect(result.isAllowed, isFalse);
+      expect(result.reason, contains('no longer authorised'));
+      expect((await store.getUser('user-1'))!.status, UserStatus.active,
+          reason: 'the block belongs to the next interactive check, not to a '
+              'job the account owner does not control');
+      expect((await store.getSession('session-1'))!.isRevoked, isFalse);
+
+      // And it stays refused: nothing was written that would soften the
+      // answer, so the grace the "could not confirm" branch extends to an
+      // operator's lost signing key is not handed to a revoked account.
+      var again = await validator.ensureValid((await store.getUser('user-1'))!,
+          interactive: false);
+      expect(again.isAllowed, isFalse);
+    });
+
+    test('is refused for a credential over the groups, with the same restraint',
+        () async {
+      // The starker half: whether the groups still allow this account is a
+      // decision taken here, from `--auth-allowed-groups`. Editing that flag
+      // used to sign every affected person out of every browser as soon as
+      // any CI job of theirs published.
+      build(makeConfig(allowedGroups: ['developers']));
+      var user = await seedUser(age: const Duration(hours: 1));
+      provider.profile = const AuthenticatedUser(
+          id: 'user-1',
+          email: 'someone@example.org',
+          displayName: 'Someone',
+          groups: ['everyone']);
+
+      var result = await validator.ensureValid(user, interactive: false);
+
+      expect(result.isAllowed, isFalse);
+      expect(result.reason, contains('group'));
+      expect((await store.getUser('user-1'))!.status, UserStatus.active);
+      expect((await store.getSession('session-1'))!.isRevoked, isFalse);
+    });
+
+    test('is refused on the next credential check inside the soft window too',
+        () async {
+      // The soft window answers from the stored record and revalidates
+      // behind the request, so the check that meets the refusal is the one
+      // whose answer nobody is waiting for. Written nowhere and remembered
+      // nowhere, that refusal was rediscovered and thrown away on every
+      // request: the record it declined to touch still looked exactly as
+      // fresh, the same branch was taken again, and the revoked credential
+      // went on publishing until `--auth-revalidate-hard` — hours, by
+      // default.
+      var user = await seedUser(age: const Duration(minutes: 10));
+      provider.refreshError = IdentityRevokedException('invalid_grant');
+
+      var first = await validator.ensureValid(user, interactive: false);
+      expect(first.isAllowed, isTrue,
+          reason: 'the soft window answers from the record, as it always has');
+      await settle();
+
+      var second = await validator.ensureValid((await store.getUser('user-1'))!,
+          interactive: false);
+
+      expect(second.isAllowed, isFalse);
+      expect(second.reason, contains('no longer authorised'));
+      expect(provider.refreshCalls, 1,
+          reason: 'the answer is remembered, not asked for a second time');
+      expect((await store.getUser('user-1'))!.status, UserStatus.active,
+          reason: 'still nothing written onto somebody else\'s account');
+      expect((await store.getSession('session-1'))!.isRevoked, isFalse);
+      expect((await store.getUser('user-1'))!.validationFailures, 0,
+          reason: 'a refusal is not an unreachable provider, and must not '
+              'spend the budget the unconfirmable are served on');
+    });
+
+    test('and an unreachable provider does not hand the refusal back',
+        () async {
+      // The refusal is remembered rather than written, so what retires that
+      // memory is load-bearing. Versioning it on `updatedAt` — which every
+      // store write moves — meant a recorded *failure* retired it: the
+      // provider goes unreachable, an interactive check counts the attempt,
+      // and the next credential request finds an active record inside the
+      // soft window and is served again. An outage is not evidence that a
+      // revoked account has been reinstated.
+      var user = await seedUser(age: const Duration(minutes: 10));
+      provider.refreshError = IdentityRevokedException('invalid_grant');
+      await validator.ensureValid(user, interactive: false);
+      await settle();
+
+      // The provider stops answering, and something interactive counts it.
+      provider.refreshError = IdentityUnavailableException('timeout');
+      await validator.sweep();
+      var after = (await store.getUser('user-1'))!;
+      expect(after.validationFailures, 1,
+          reason: 'the failure was recorded, which is what used to clear the '
+              'refusal');
+      expect(after.status, UserStatus.active);
+
+      var next = await validator.ensureValid(after, interactive: false);
+
+      expect(next.isAllowed, isFalse);
+      expect(next.reason, contains('no longer authorised'));
+    });
+
+    test('but an administrator restoring access does hand it back', () async {
+      // The other half of the same rule, and the reason the note is retired
+      // by anything at all: `lastValidatedAt` backdated to the epoch is what
+      // an unblock writes to force a fresh check, and a note that outlived
+      // it would leave CI refused until somebody signed in from a browser.
+      var user = await seedUser(age: const Duration(hours: 1));
+      provider.refreshError = IdentityRevokedException('invalid_grant');
+      expect((await validator.ensureValid(user, interactive: false)).isAllowed,
+          isFalse);
+
+      // What the administration screen does, and the provider relents.
+      await store.setUserStatus('user-1', UserStatus.active);
+      await store.recordValidation('user-1',
+          validatedAt: DateTime.fromMillisecondsSinceEpoch(0), failures: 0);
+      provider.refreshError = null;
+
+      var next = await validator.ensureValid((await store.getUser('user-1'))!,
+          interactive: false);
+
+      expect(next.isAllowed, isTrue);
+    });
+
+    test('but a browser request asks for itself rather than taking that note',
+        () async {
+      // The note is an unverified answer, possibly from a check that raced a
+      // token rotation — `invalid_grant` is what a spent refresh token earns
+      // too. Refusing somebody their own UI on it, with no block recorded to
+      // explain it and no sign-in offered, is the write-free version of the
+      // harm this path exists to avoid. And once the interactive check says
+      // yes, the note is gone.
+      var user = await seedUser(age: const Duration(hours: 1));
+      provider.refreshError = IdentityRevokedException('invalid_grant');
+      await validator.ensureValid(user, interactive: false);
+
+      provider.refreshError = null;
+      var browser =
+          await validator.ensureValid((await store.getUser('user-1'))!);
+
+      expect(browser.isAllowed, isTrue);
+      expect(provider.refreshCalls, 2, reason: 'it did the round trip itself');
+      expect(
+          (await validator.ensureValid((await store.getUser('user-1'))!,
+                  interactive: false))
+              .isAllowed,
+          isTrue,
+          reason: 'a confirmation retires the refusal remembered for it');
+    });
+
+    test(
+        'and the block a credential check left undone lands on the next '
+        'browser request', () async {
+      // Deferred, not dropped. Somebody who can be told is told.
+      var user = await seedUser(age: const Duration(hours: 1));
+      provider.userInfoError = IdentityRevokedException('HTTP 401');
+
+      await validator.ensureValid(user, interactive: false);
+      var browser =
+          await validator.ensureValid((await store.getUser('user-1'))!);
+
+      expect(browser.isAllowed, isFalse);
+      expect(
+          (await store.getUser('user-1'))!.status, UserStatus.blockedUpstream);
+      expect((await store.getSession('session-1'))!.isRevoked, isTrue);
+    });
+
+    test('or on the sweep, which is what reaches the sessions unprompted',
+        () async {
+      // The other half of the deferral, and the reason it is bounded: the
+      // sweep walks exactly the accounts holding live sessions — the ones
+      // with something to lose — every `--auth-revalidate-interval`.
+      var user = await seedUser(age: const Duration(hours: 1));
+      provider.userInfoError = IdentityRevokedException('HTTP 401');
+
+      await validator.ensureValid(user, interactive: false);
+      expect((await store.getSession('session-1'))!.isRevoked, isFalse);
+
+      await validator.sweep();
+
+      expect(
+          (await store.getUser('user-1'))!.status, UserStatus.blockedUpstream);
+      expect((await store.getSession('session-1'))!.isRevoked, isTrue);
+    });
+
     test('cannot be verified at all without a refresh token', () async {
       var now = DateTime.now();
       await store.upsertUser(
@@ -630,6 +826,17 @@ void main() {
       expect(await store.getSession('old'), isNull);
     });
   });
+}
+
+/// Lets an unawaited background revalidation run to the end.
+///
+/// The soft window's whole point is that the check does not sit in front of
+/// the request, so the interesting write happens some turns of the event loop
+/// after `ensureValid` has answered.
+Future<void> settle() async {
+  for (var i = 0; i < 20; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
 }
 
 /// Counts the one query the clash warning makes, which is the query that

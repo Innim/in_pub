@@ -52,6 +52,29 @@ class UserValidator {
   /// retired — logging out a perfectly valid user.
   final _inFlight = <String, _Validation>{};
 
+  /// Refusals this process reached but deliberately did not write down.
+  ///
+  /// A credential check refuses without touching the record, which leaves
+  /// the next request nothing to read — and "nothing" inside the soft window
+  /// means the stored record is served once more. The refusal would be
+  /// rediscovered and thrown away on every request until the hard deadline,
+  /// which is no bound at all for a credential. Remembered here instead:
+  /// in memory, on this isolate, keyed by user.
+  ///
+  /// Deliberately not durable, and the bound that follows is worth stating
+  /// plainly. The reason for not writing is that this evidence can be wrong
+  /// — `invalid_grant` is also what a *spent* refresh token earns, which is
+  /// what a credential check racing a rotation produces — so it must not
+  /// outlive the process that saw it. After a restart the account gets the
+  /// soft window's grace back, until the hard deadline or the next
+  /// interactive check, exactly as it would after a provider outage.
+  ///
+  /// Bounded in size by the accounts that exist, the keys being ids the
+  /// store handed out, and each entry is dropped the next time the account
+  /// is looked at once something has re-established it — see [_refusalFor]
+  /// for what counts as that, and what deliberately does not.
+  final _refusals = <String, _Refusal>{};
+
   Timer? _timer;
 
   UserValidator({
@@ -87,10 +110,27 @@ class UserValidator {
   /// A browser session can: telling its owner to sign in again is something
   /// they are present to do. A bearer credential cannot — whoever holds it
   /// is a CI job, and the account owner may not be at a keyboard at all. So
-  /// a credential check never writes `needsSignIn` and never revokes browser
-  /// sessions: one `dart pub publish` from CI used to sign the owner out of
-  /// every browser they had open, a write side effect on somebody else's
-  /// account triggered by what should be a read-only check.
+  /// a credential check never writes `needsSignIn`, never records a block
+  /// and never revokes browser sessions: one `dart pub publish` from CI used
+  /// to sign the owner out of every browser they had open, a write side
+  /// effect on somebody else's account triggered by what should be a
+  /// read-only check.
+  ///
+  /// Refusing is a different matter, and a credential check still does it.
+  /// An account the provider has stopped vouching for, or one the allowed
+  /// groups no longer cover, is refused whoever is asking. Writing nothing
+  /// is not the same as forgetting, though: the refusal is remembered in
+  /// [_refusals] for as long as this process runs, and consulted below
+  /// before either age branch. Without that the soft window answers the next
+  /// request from the same untouched record and revalidates in the
+  /// background again — discovering the same refusal, discarding it again —
+  /// so a revoked credential would go on publishing until
+  /// `--auth-revalidate-hard`, which can be hours.
+  ///
+  /// Only the *record* waits, and only for somebody who can be told: the
+  /// next interactive check writes the block and ends the sessions, or the
+  /// sweep does, which re-checks precisely the accounts that have sessions
+  /// to lose and reaches them within `--auth-revalidate-interval`.
   Future<ValidationResult> ensureValid(StoredUser user,
       {bool interactive = true}) async {
     if (!user.isActive) {
@@ -99,6 +139,22 @@ class UserValidator {
           // `needsSignIn` is a prompt, not a withdrawal, and the two are
           // answered differently: one offers the sign-in that fixes it.
           recoverable: user.needsSignIn);
+    }
+
+    // A refusal this process has already reached for this account on a
+    // check that deliberately wrote nothing down. It has to be answered
+    // before the age branches below, because both of them read the stored
+    // record — and the stored record is exactly what that refusal declined
+    // to touch.
+    //
+    // Credentials only. A browser request goes on doing the real check: the
+    // note is an unverified answer, possibly from a check that raced a token
+    // rotation, and refusing a person their own UI on it — with no block
+    // recorded, so no sign-in offered and nothing to explain it — is the
+    // write-free version of the harm this whole path exists to avoid.
+    if (!interactive) {
+      var remembered = _refusalFor(user);
+      if (remembered != null) return ValidationResult.denied(remembered);
     }
 
     var age = _validationAge(user);
@@ -115,14 +171,23 @@ class UserValidator {
     }
 
     // Past the window: the answer has to be current before we serve anything.
-    var refreshed = await _validate(user, interactive: interactive);
+    var verdict = await _validate(user, interactive: interactive);
+    var refusal = verdict.refusal;
+    if (refusal != null) {
+      // A definite no: the provider stopped vouching for the account, or the
+      // allowed groups no longer cover it. Whether that has been written
+      // onto the record depends on who asked — an interactive check blocks,
+      // a credential check deliberately leaves the account alone — but this
+      // request is refused with the same words either way.
+      return ValidationResult.denied(refusal);
+    }
+    var refreshed = verdict.user;
     if (refreshed == null) {
       var current = await store.getUser(user.id);
-      // A real refusal — the provider said no, or the groups no longer allow
-      // it — is recorded on the account, and refuses here whoever is asking.
-      // A null with the account still active means something else entirely:
-      // there was nothing to ask the provider *with*, because the stored
-      // refresh token no longer decrypts. That is a lost or rotated
+      // Not a refusal: those return above, with their reason in hand. A null
+      // here is the check failing to reach an answer at all — most often
+      // because there was nothing to ask the provider *with*, since the
+      // stored refresh token no longer decrypts. That is a lost or rotated
       // `INPUB_AUTH_SESSION_SECRET` — an operator's mistake, and evidence
       // about the deployment rather than about the account. Refusing a
       // credential over it on the first request stopped every CI job at
@@ -206,6 +271,39 @@ class UserValidator {
     return ValidationResult.ok(refreshed);
   }
 
+  /// The refusal remembered for [user], if it still stands.
+  ///
+  /// Retired by anything that re-establishes the account, none of which is
+  /// visible from here: a successful revalidation, a fresh sign-in, an
+  /// administrator unblocking or restoring it. Without that an administrator
+  /// putting access back would leave CI refused until somebody happened to
+  /// sign in from a browser.
+  ///
+  /// The version to compare is the pair of fields that carry a verdict —
+  /// `status` and `lastValidatedAt` — and *not* `updatedAt`, which was the
+  /// first attempt and was wrong. `updatedAt` moves on every write including
+  /// the one that says nothing: an unreachable provider records a failure
+  /// count, and that alone would have retired a definite refusal, handing the
+  /// credential back the soft window's grace on the strength of an outage.
+  /// Precisely the event that establishes nothing must not clear a verdict.
+  ///
+  /// Equality, not "later than". An administrator unblocking an account
+  /// deliberately backdates `lastValidatedAt` to the epoch, so that the next
+  /// request has to prove it against the provider; a note that only stood
+  /// down for newer timestamps would have survived exactly the action meant
+  /// to restore access. A changed `--auth-allowed-groups` needs no rule at
+  /// all: it is a startup flag, so changing it restarts the process and
+  /// every note goes with it.
+  String? _refusalFor(StoredUser user) {
+    var noted = _refusals[user.id];
+    if (noted == null) return null;
+    if (!noted.stillStandsFor(user)) {
+      _refusals.remove(user.id);
+      return null;
+    }
+    return noted.reason;
+  }
+
   Duration _validationAge(StoredUser user) =>
       DateTime.now().difference(user.lastValidatedAt ?? user.createdAt);
 
@@ -256,7 +354,7 @@ class UserValidator {
     }
   }
 
-  Future<StoredUser?> _validate(StoredUser user, {bool interactive = true}) {
+  Future<_Verdict> _validate(StoredUser user, {bool interactive = true}) {
     var existing = _inFlight[user.id];
     // Joining is only safe towards the stricter answer. A credential check
     // deliberately leaves an account it cannot confirm alone — it will not
@@ -291,20 +389,20 @@ class UserValidator {
   /// have rotated the refresh token, and asking the provider with the
   /// retired one answers `invalid_grant` — which this class reads as a
   /// revocation and blocks the account over.
-  Future<StoredUser?> _afterCredentialCheck(String id) async {
+  Future<_Verdict> _afterCredentialCheck(String id) async {
     var current = await store.getUser(id);
-    if (current == null) return null;
+    if (current == null) return const _Verdict.checked(null);
     // That run may have confirmed the account outright, in which case there
     // is nothing an interactive one would do differently and no reason to
     // spend a second round trip on the provider.
     if (current.isActive &&
         _validationAge(current) < config.revalidateInterval) {
-      return current;
+      return _Verdict.checked(current);
     }
     return _doValidate(current);
   }
 
-  Future<StoredUser?> _doValidate(StoredUser user,
+  Future<_Verdict> _doValidate(StoredUser user,
       {bool interactive = true}) async {
     var encrypted = user.refreshTokenEnc;
     var refreshToken = encrypted == null ? null : crypto.decrypt(encrypted);
@@ -340,14 +438,14 @@ class UserValidator {
         }
         _log.info('${user.id} has nothing left to revalidate with; leaving '
             'the account alone because this is a credential check');
-        return null;
+        return const _Verdict.unconfirmed();
       }
       _log.info('${user.id} has nothing left to revalidate with; ending '
           'their sessions and asking them to sign in again');
       await store.setUserStatus(user.id, UserStatus.needsSignIn,
           reason: 'please sign in again to confirm your account');
       await store.revokeUserSessions(user.id, 'please sign in again');
-      return null;
+      return const _Verdict.unconfirmed();
     }
 
     OidcTokens tokens;
@@ -361,11 +459,11 @@ class UserValidator {
       fresh = await provider.userInfo(tokens.accessToken);
     } on IdentityRevokedException catch (e) {
       _log.info('access revoked for ${user.id}: ${e.message}');
-      await _block(
+      return await _refuse(
           user,
           'your account is no longer authorised on the '
-          'identity provider');
-      return null;
+          'identity provider',
+          interactive: interactive);
     } on IdentityUnavailableException catch (e) {
       // An unreachable provider is not a revocation. Count it and keep the
       // user working until the hard deadline says otherwise.
@@ -373,16 +471,16 @@ class UserValidator {
       _log.warning('could not revalidate ${user.id} '
           '(attempt $failures): ${e.message}');
       await store.recordValidation(user.id, failures: failures);
-      return await store.getUser(user.id);
+      return _Verdict.checked(await store.getUser(user.id));
     }
 
     if (!config.isAllowedGroup(fresh.groups)) {
       _log.info('access revoked for ${user.id}: no longer in an allowed group');
-      await _block(
+      return await _refuse(
           user,
           'your account is no longer a member of a group with '
-          'access to this server');
-      return null;
+          'access to this server',
+          interactive: interactive);
     }
 
     // The provider may have moved this address. A service token minted for
@@ -423,23 +521,117 @@ class UserValidator {
       email: address.isEmpty ? null : fresh.email,
       displayName: fresh.displayName,
     );
-    return await store.getUser(user.id);
+    // Confirmed, so any refusal remembered for this account is out of date.
+    // `_refusalFor` would retire it on the next request anyway — the write
+    // above moves `updatedAt` — but dropping it here keeps the map to the
+    // accounts actually being refused.
+    _refusals.remove(user.id);
+    return _Verdict.checked(await store.getUser(user.id));
   }
 
-  Future<void> _block(StoredUser user, String reason) async {
+  /// Turns a definite refusal into a verdict, blocking the account when
+  /// there is somebody present to be told.
+  ///
+  /// [interactive] decides that, and it decides nothing about the refusal
+  /// itself: the caller is refused either way. What it governs is the two
+  /// writes — the status an administrator reads, and the end of every
+  /// browser session the account holds.
+  ///
+  /// A credential check makes neither. Whoever is holding the credential is
+  /// a CI job, and signing the account's owner out of every browser they had
+  /// open — from a `dart pub publish` they did not run and cannot answer — is
+  /// a write side effect on somebody else's account, produced by what should
+  /// be a read-only check. The evidence is also not always as firm as it
+  /// looks here: `invalid_grant` is what the provider says about a refresh
+  /// token that was merely *spent*, which is exactly what a credential check
+  /// racing a rotation produces, and reading that as a revocation would end
+  /// the sessions of a perfectly valid user.
+  ///
+  /// The refusal is not forgotten for being unwritten: it goes into
+  /// [_refusals], which `ensureValid` consults ahead of both age branches,
+  /// so every later credential check is refused straight away and without a
+  /// second round trip. That is the part which cannot be left out — a
+  /// refusal reached inside the soft window is reached by the *background*
+  /// check, whose answer nobody is waiting for, and with neither a write nor
+  /// a note it would be rediscovered and dropped on every request until the
+  /// hard deadline.
+  ///
+  /// The block itself is the next interactive check's to write, or the
+  /// sweep's, which re-checks exactly the accounts holding live sessions and
+  /// gets to them within `--auth-revalidate-interval`. An account with no
+  /// sessions is never swept and so stays `active` on the administration
+  /// screen until somebody signs in — but it has nothing to lose either, and
+  /// its credential goes on being refused for as long as this process runs.
+  Future<_Verdict> _refuse(StoredUser user, String reason,
+      {required bool interactive}) async {
+    if (!interactive) {
+      _refusals[user.id] = _Refusal(reason,
+          status: user.status, confirmedAt: user.lastValidatedAt);
+      _log.warning('refusing a credential for ${user.id}: $reason. The '
+          'account is left as it is: a credential check must not sign its '
+          'owner out of the browsers they have open');
+      return _Verdict.refused(reason);
+    }
+    _refusals.remove(user.id);
     await store.setUserStatus(user.id, UserStatus.blockedUpstream,
         reason: reason);
     var ended = await store.revokeUserSessions(user.id, reason);
     _log.info('ended $ended session(s) for ${user.id}');
+    return _Verdict.refused(reason);
   }
 }
 
 /// A revalidation currently running, and whether it may prompt.
 class _Validation {
-  final Future<StoredUser?> result;
+  final Future<_Verdict> result;
   final bool interactive;
 
   const _Validation(this.result, this.interactive);
+}
+
+/// A refusal reached without writing it onto the account.
+class _Refusal {
+  /// What to tell the next credential that presents itself.
+  final String reason;
+
+  /// The account's state when this was reached, in the only two fields that
+  /// say anything about whether it is allowed. A failure count is not among
+  /// them on purpose: an unreachable provider moves it, and an outage is not
+  /// evidence that a revoked account has been reinstated.
+  final UserStatus status;
+  final DateTime? confirmedAt;
+
+  const _Refusal(this.reason,
+      {required this.status, required this.confirmedAt});
+
+  /// Whether nothing has happened since that would supersede this refusal.
+  bool stillStandsFor(StoredUser user) =>
+      user.status == status && user.lastValidatedAt == confirmedAt;
+}
+
+/// What one revalidation run concluded.
+///
+/// Three answers, not two. "Still allowed" carries the refreshed record;
+/// "not allowed" carries the reason; "could not tell" carries neither. The
+/// last two used to share a bare null, and `ensureValid` told them apart by
+/// re-reading the account and looking for a block — which worked only for as
+/// long as every refusal wrote one. A credential check refuses without
+/// writing anything, so the difference has to be carried rather than
+/// inferred; inferred, it read as "could not confirm" and handed a revoked
+/// account the grace that branch extends to an operator's lost signing key.
+class _Verdict {
+  /// The account as it now stands, when nothing objected to it. Null when
+  /// the check reached no answer — or when the record has since gone.
+  final StoredUser? user;
+
+  /// Why access is refused, when the answer was a definite no.
+  final String? refusal;
+
+  const _Verdict.checked(this.user) : refusal = null;
+  const _Verdict.unconfirmed()
+      : user = null,
+        refusal = null;
+  const _Verdict.refused(String this.refusal) : user = null;
 }
 
 /// Logs when an account takes on an address a live service token already
