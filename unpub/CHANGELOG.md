@@ -4,10 +4,12 @@
 - `--auth-credential-cache`, how long an accepted bearer credential may be answered again from memory before the account behind it is read afresh. Defaults to `5s`; `0` turns it off. Checking a credential costs two database reads and one `dart pub get` over a workspace makes hundreds of gated requests. Refusals are never held, and revoking a token, blocking an account or any refusal the revalidator reaches drops what this server remembers at once, so those land on the very next request; the window bounds only what changes behind this process's back.
 
 ### Changed
+- The address helpers (`normalizeAddress`, `storedAddressPattern`, `looksLikeEmailAddress`) moved to `src/address.dart`, so the package layer no longer imports the auth store for string folding. They are still exported from `package:in_pub/in_pub.dart`.
 - Generated API documentation accepts a bearer token as well as a browser session, so a CI job or a docs mirror can read it. It stays gated whenever `--auth` is on, with or without `--auth-protect-pub-api`.
 - Three queries on the sign-in and sweep paths no longer scan their whole collection: the session sweep and the service-token address lookup are answered from indexes, and the clash warning a sign-in logs is no longer waited for. Token documents gain a folded `emailKey`, and `--auth-session-idle` is applied in one place instead of three.
 
 ### Fixed
+- A malformed `--auth-public-url` is reported in the startup validation list with the other problems, instead of throwing a stack trace before that list can be printed.
 - A publish refused by the handler now carries the same `dart pub token add` instruction the gate's refusals do. On the default configuration the gate stands aside for `/api/`, so a publisher saw only the bare reason.
 - A group name with a space in it is no longer split into two: a `groups` claim sent as a delimited string is separated on commas alone, which is what the gateways that flatten one actually use.
 - Unblocking an account that is waiting for its owner to sign in is refused rather than accepted and undone by that account's next request. The web UI never offered it; the API did.

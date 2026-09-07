@@ -12,6 +12,7 @@ import 'package:shelf_cors_headers/shelf_cors_headers.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:pub_semver/pub_semver.dart' as semver;
 import 'package:archive/archive.dart';
+import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/models.dart';
 import 'package:in_pub/unpub_api/lib/models.dart';
 import 'package:in_pub/src/meta_store.dart';
@@ -21,7 +22,6 @@ import 'package:in_pub/src/doc_progress_page.dart';
 import 'package:in_pub/src/auth/auth_middleware.dart';
 import 'package:in_pub/src/auth/http_helpers.dart';
 import 'package:in_pub/src/auth/identity.dart';
-import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/auth_service.dart';
 import 'package:in_pub/src/auth/google_credential.dart';
 import 'package:path/path.dart' as p;
@@ -116,20 +116,8 @@ class App {
   static shelf.Response _okWithJson(Map<String, dynamic> data) =>
       shelf.Response.ok(
         json.encode(data),
-        headers: {HttpHeaders.contentTypeHeader: _jsonContentType},
+        headers: {HttpHeaders.contentTypeHeader: jsonContentType},
       );
-
-  /// `application/json` with the encoding spelled out.
-  ///
-  /// `ContentType.json.mimeType` drops the charset that `ContentType.json`
-  /// itself carries. Nothing was broken by that — shelf puts it back when
-  /// the body is a string, which every answer here is — but the guarantee
-  /// then lives in shelf rather than in this file, and a body handed over as
-  /// bytes would silently lose it. What is at stake is not decoration:
-  /// `package:http`, which the web UI fetches with, reads a body with no
-  /// stated charset as latin1, and every README and description this server
-  /// answers with is text somebody wrote.
-  static const _jsonContentType = 'application/json; charset=utf-8';
 
   static shelf.Response _successMessage(String message) => _okWithJson({
         'success': {'message': message}
@@ -139,7 +127,7 @@ class App {
           {int status = HttpStatus.badRequest}) =>
       shelf.Response(
         status,
-        headers: {HttpHeaders.contentTypeHeader: _jsonContentType},
+        headers: {HttpHeaders.contentTypeHeader: jsonContentType},
         body: json.encode({
           'error': {'message': message}
         }),

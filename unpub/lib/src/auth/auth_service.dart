@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:logging/logging.dart';
 import 'package:shelf/shelf.dart' as shelf;
 
+import '../address.dart';
 import 'auth_config.dart';
 import 'auth_middleware.dart';
 import 'auth_routes.dart';

@@ -6,6 +6,24 @@ import 'package:shelf/shelf.dart' as shelf;
 import 'auth_config.dart';
 import 'crypto_box.dart';
 
+/// `application/json` with the encoding spelled out.
+///
+/// `ContentType.json.mimeType` drops the charset that `ContentType.json`
+/// itself carries. Nothing was broken by that — shelf puts it back when the
+/// body is a string, which every answer here is — but the guarantee then
+/// lives in shelf rather than in this package, and a body handed over as
+/// bytes would silently lose it. What is at stake is not decoration:
+/// `package:http`, which the web UI fetches with, reads a body with no
+/// stated charset as latin1, and every README and description this server
+/// answers with is text somebody wrote.
+///
+/// Here rather than beside the first answer that needed it, because the auth
+/// routes and the package API both answer JSON and neither can see a private
+/// constant on the other. It was written out by hand in four places before
+/// this, under a comment on one of them arguing that it must live in exactly
+/// one.
+const jsonContentType = 'application/json; charset=utf-8';
+
 /// Parses a `Cookie` request header. Shelf leaves cookies alone, so this is
 /// the only place that knows their wire format.
 Map<String, String> parseCookies(shelf.Request req) {
@@ -201,7 +219,7 @@ shelf.Response webRefusal(String message,
               if (denied) 'deniedDetail': signRefusalDetail(crypto, message),
             }),
             headers: {
-              HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
+              HttpHeaders.contentTypeHeader: jsonContentType,
               HttpHeaders.cacheControlHeader: 'no-store',
             }),
         cookies);
@@ -254,7 +272,7 @@ shelf.Response pubUnauthorized(String message, {AuthConfig? auth}) {
   return shelf.Response(
     HttpStatus.unauthorized,
     headers: {
-      HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
+      HttpHeaders.contentTypeHeader: jsonContentType,
       HttpHeaders.wwwAuthenticateHeader:
           'Bearer realm="pub", message="${quoteHeaderValue(full)}"',
       HttpHeaders.cacheControlHeader: 'no-store',

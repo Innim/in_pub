@@ -353,7 +353,15 @@ class AuthConfig {
           '(INPUB_AUTH_CLIENT_SECRET or --auth-client-secret)');
     }
     if (!publicUrl.hasScheme || publicUrl.host.isEmpty) {
-      errors.add('--auth-public-url must be an absolute url');
+      // Where a value that is no url at all lands too: the command line
+      // parses this leniently, so that a `FormatException` out of
+      // `Uri.parse` cannot escape ahead of this report, and hands an
+      // unparseable value over as the empty uri. The shape is spelled out
+      // for that reason — unstated and unparseable read the same here, and
+      // the second only makes sense once the operator is told what was
+      // expected.
+      errors.add('--auth-public-url must be an absolute url: expected a '
+          'scheme, host and optional port, as in "https://pub.example.org"');
     }
     if (publicUrl.path.isNotEmpty && publicUrl.path != '/') {
       // The built page carries `<base href="/">`, so every link the

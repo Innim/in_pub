@@ -2,6 +2,7 @@ import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 import 'package:mongo_dart/mongo_dart.dart';
 
+import '../address.dart';
 import 'auth_store.dart';
 import 'identity.dart';
 

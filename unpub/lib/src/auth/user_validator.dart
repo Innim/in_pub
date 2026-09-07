@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:logging/logging.dart';
 
+import '../address.dart';
 import 'auth_config.dart';
 import 'auth_store.dart';
 import 'crypto_box.dart';

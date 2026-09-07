@@ -8,6 +8,7 @@ import 'package:shelf_router/shelf_router.dart';
 
 import 'package:in_pub/unpub_api/lib/models.dart';
 
+import '../address.dart';
 import 'auth_config.dart';
 import 'auth_pages.dart';
 import 'auth_store.dart';
@@ -1270,7 +1271,7 @@ shelf.Response _json(Map<String, dynamic> body,
         {int status = HttpStatus.ok, List<String> cookies = const []}) =>
     withCookies(
         shelf.Response(status, body: json.encode(body), headers: {
-          HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
+          HttpHeaders.contentTypeHeader: jsonContentType,
           HttpHeaders.cacheControlHeader: 'no-store',
         }),
         cookies);

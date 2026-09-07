@@ -5,6 +5,7 @@ import 'package:logging/logging.dart';
 import 'package:mongo_dart/mongo_dart.dart';
 import 'package:yaml/yaml.dart';
 import 'package:in_pub/in_pub.dart' as in_pub;
+import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/shutdown.dart';
 import 'package:in_pub/src/utils.dart';
 
@@ -133,7 +134,7 @@ main(List<String> args) async {
                     // and was then matched by `App`, which does trim —
                     // handing the token exactly the package it was meant to
                     // be kept away from.
-                    r'$regex': in_pub.storedAddressPattern(email),
+                    r'$regex': storedAddressPattern(email),
                     r'$options': 'i',
                   }
                 }
@@ -353,9 +354,17 @@ in_pub.AuthConfig _authConfigFrom(ArgResults results) {
             env['INPUB_AUTH_CLIENT_SECRET'] ??
             '')
         .trim(),
-    publicUrl: Uri.parse(
-        (publicUrl.isEmpty ? env['INPUB_AUTH_PUBLIC_URL'] ?? '' : publicUrl)
-            .trim()),
+    // Parsed leniently, like `--auth-dev-origins` and for the same reason:
+    // `Uri.parse` throws on a value such as `http://[::1`, and it throws
+    // from here, where nothing catches it — so a typo in one flag answered
+    // with a Dart stack trace instead of the "Authentication is
+    // misconfigured" list this path exists to print. Unparseable becomes
+    // the empty uri, which `validate` reports alongside every other problem
+    // rather than in place of them.
+    publicUrl: Uri.tryParse(
+            (publicUrl.isEmpty ? env['INPUB_AUTH_PUBLIC_URL'] ?? '' : publicUrl)
+                .trim()) ??
+        Uri(),
     secret: in_pub.AuthConfig.resolveSecret(secretValue),
     allowedGroups: _csv(results['auth-allowed-groups'] as String?),
     adminGroups: _csv(results['auth-admin-groups'] as String?),

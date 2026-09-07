@@ -1,3 +1,4 @@
+import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/identity.dart';
 import 'package:in_pub/src/auth/mongo_auth_store.dart';
