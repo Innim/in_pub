@@ -500,15 +500,16 @@ abstract class AuthStore {
   /// The new secret starts out unconfirmed
   /// ([StoredSession.currentSecretSeen] false).
   ///
-  /// [prevSecretHash] is stated explicitly rather than assumed to be the
-  /// expected one: when a client is catching up after missing a cookie
-  /// update, the secret that stays valid is the one it just presented, not
-  /// the one it never received.
+  /// [expectedSecretHash] becomes [StoredSession.prevSecretHash]: the secret
+  /// that was current is exactly the one that stays acceptable. There is no
+  /// parameter for choosing something else, because there is no safe choice —
+  /// the two slots hold the two secrets this server has handed out, and
+  /// putting anything else in the second one strands a cookie a client may
+  /// still be carrying.
   Future<bool> rotateSession(
     String id, {
     required String expectedSecretHash,
     required String newSecretHash,
-    required String prevSecretHash,
     required DateTime prevValidUntil,
     required DateTime rotatedAt,
   });

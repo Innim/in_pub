@@ -1,9 +1,13 @@
 ## Unreleased
 
 ### Fixed
+- A browser is no longer accused of holding a cloned cookie because two of its requests crossed the session-secret rotation boundary. A request that arrived on the previous secret re-issued a third one, pushing the secret already delivered to the browser out of both slots; it is now served on what it presented and nothing is written.
 - Removing the last uploader of a package is refused instead of committed: an empty uploader list left the package impossible to publish to, delete from or add an uploader back to, short of editing the database.
 - A credential check no longer blocks the account or ends its browser sessions: one `dart pub publish` from CI signed the owner out of every browser they had open, over evidence that can be a raced refresh token. The credential is still refused, and the block is left to the next sign-in or to the sweep. The administration screen calls that state "no longer authorised" rather than "revoked by provider", since a `--auth-allowed-groups` change made here reaches it too.
 - The uploader and publish routes authenticate before they read or validate anything the caller sent, and an `Authorization` header carrying a scheme other than `bearer` is refused rather than having its value handed to Google's `tokeninfo` — a proxy adding Basic auth in front of this server sent the password there.
+
+### Breaking
+- `AuthStore.rotateSession` no longer takes `prevSecretHash`: the expected secret is the one that stays acceptable, and every other choice strands a cookie a client may still hold. Anyone with their own `AuthStore` implementation has to drop the parameter.
 
 ## 3.5.0
 

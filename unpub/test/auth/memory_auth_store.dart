@@ -144,7 +144,6 @@ class MemoryAuthStore extends AuthStore {
     String id, {
     required String expectedSecretHash,
     required String newSecretHash,
-    required String prevSecretHash,
     required DateTime prevValidUntil,
     required DateTime rotatedAt,
   }) async {
@@ -154,7 +153,7 @@ class MemoryAuthStore extends AuthStore {
     }
     sessions[id] = _copySession(session,
         secretHash: newSecretHash,
-        prevSecretHash: prevSecretHash,
+        prevSecretHash: expectedSecretHash,
         prevValidUntil: prevValidUntil,
         currentSecretSeen: false,
         rotatedAt: rotatedAt);

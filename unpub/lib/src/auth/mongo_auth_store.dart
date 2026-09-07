@@ -342,7 +342,6 @@ class MongoAuthStore extends AuthStore {
     String id, {
     required String expectedSecretHash,
     required String newSecretHash,
-    required String prevSecretHash,
     required DateTime prevValidUntil,
     required DateTime rotatedAt,
   }) async {
@@ -353,7 +352,7 @@ class MongoAuthStore extends AuthStore {
         where.eq('_id', id).eq('secretHash', expectedSecretHash),
         modify
             .set('secretHash', newSecretHash)
-            .set('prevSecretHash', prevSecretHash)
+            .set('prevSecretHash', expectedSecretHash)
             .set('prevValidUntil', prevValidUntil)
             .set('currentSecretSeen', false)
             .set('rotatedAt', rotatedAt));

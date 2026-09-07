@@ -257,21 +257,26 @@ void main() {
 
       var retry = await sessions.resolve(request(cookie));
       expect(retry.outcome, SessionOutcome.ok);
-      expect(retry.cookies, isNotEmpty,
-          reason: 'the client must be handed a secret it can actually use');
+      expect(retry.cookies, isEmpty,
+          reason: 'the secret it is already holding is still accepted, and a '
+              'fresh one here would push the secret this server has already '
+              'delivered out of both slots');
 
       var session = await store.getSession(sessionIdOf(cookie));
       expect(session!.isRevoked, isFalse);
     });
 
-    test('recovers: the re-issued secret works', () async {
+    test('keeps working on the secret it holds', () async {
       var cookie = await signIn();
       await sessions.resolve(request(cookie));
-      var retry = await sessions.resolve(request(cookie));
-      var recovered = cookieValue(retry.cookies.single);
 
-      var result = await sessions.resolve(request(recovered));
-      expect(result.outcome, SessionOutcome.ok);
+      // Several more requests from the same behind client, none of which is
+      // handed anything new: the previous secret carries them until the
+      // grace runs out or the client catches up on its own.
+      for (var i = 0; i < 3; i++) {
+        var result = await sessions.resolve(request(cookie));
+        expect(result.outcome, SessionOutcome.ok, reason: 'request $i');
+      }
     });
 
     test('a burst of parallel requests on one secret is not a clone', () async {
@@ -286,6 +291,78 @@ void main() {
       expect(results.map((r) => r.outcome), everyElement(SessionOutcome.ok));
       var session = await store.getSession(sessionIdOf(cookie));
       expect(session!.isRevoked, isFalse);
+    });
+  });
+
+  group('responses that land out of order', () {
+    /// Truly parallel requests are safe on their own: the compare-and-set
+    /// picks one winner. The dangerous shape is sequential — a request that
+    /// left before the rotation and arrives after it — because it is served
+    /// from a session document that has already moved on, while the browser
+    /// applies the two `Set-Cookie` headers in whatever order they land.
+    test('a straggler does not orphan the secret the browser kept', () async {
+      var s1 = await signIn();
+
+      // A crosses the rotation boundary and is handed the new secret.
+      var a = await sessions.resolve(request(s1));
+      var s2 = cookieValue(a.cookies.single);
+
+      // B left before A's response came back, so it still carries the old
+      // secret. It must be served, and it must not move the session on.
+      var b = await sessions.resolve(request(s1));
+      expect(b.outcome, SessionOutcome.ok);
+      // Read now, because the request below confirms the current secret and
+      // clears the previous slot.
+      var afterStraggler = store.sessions[sessionIdOf(s1)]!;
+
+      // The browser applies B's response first and A's second, so its jar
+      // ends up holding A's secret.
+      var jar = s1;
+      for (var setCookie in [...b.cookies, ...a.cookies]) {
+        jar = cookieValue(setCookie);
+      }
+      expect(jar, s2);
+
+      var next = await sessions.resolve(request(jar));
+      expect(next.outcome, SessionOutcome.ok,
+          reason: 'the browser is holding a secret this server issued and '
+              'never retired; calling that a clone would end the session — '
+              'every session of that user under --auth-reuse-kills-all');
+      expect(store.sessions[sessionIdOf(s1)]!.isRevoked, isFalse);
+
+      // The same thing said structurally: both secrets this server handed
+      // out were still in the document when the straggler was done with it.
+      expect(afterStraggler.secretHash, CryptoBox.hash(s2.split('.').last),
+          reason: 'the secret already delivered must still be the current '
+              'one');
+      expect(afterStraggler.prevSecretHash, CryptoBox.hash(s1.split('.').last),
+          reason: 'and the one the straggler presented must still be the '
+              'previous one');
+      expect(b.cookies, isEmpty,
+          reason: 'a third secret is a secret one of the two live cookies '
+              'must be evicted for');
+    });
+
+    test('a secret this server never issued is still a clone', () async {
+      var s1 = await signIn();
+      var a = await sessions.resolve(request(s1));
+      var s2 = cookieValue(a.cookies.single);
+
+      // Leaves the session in the same state as the test above: two secrets
+      // live, neither retired.
+      await sessions.resolve(request(s1));
+
+      var forged = '${sessionIdOf(s1)}.${CryptoBox.randomToken()}';
+      var result = await sessions.resolve(request(forged));
+
+      expect(result.outcome, SessionOutcome.cloned,
+          reason: 'tolerating the two secrets this server handed out must '
+              'not mean tolerating a third');
+      expect(store.sessions[sessionIdOf(s1)]!.isRevoked, isTrue);
+      expect(
+          (await sessions.resolve(request(s2))).outcome, SessionOutcome.revoked,
+          reason: 'the session is gone for the real client too, which is '
+              'what makes the theft visible');
     });
   });
 
