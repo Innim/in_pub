@@ -35,9 +35,9 @@ void main() {
         revalidateHard: const Duration(days: 365),
       );
 
-  void build([AuthConfig? cfg]) {
+  void build([AuthConfig? cfg, MemoryAuthStore? withStore]) {
     config = cfg ?? makeConfig();
-    store = MemoryAuthStore();
+    store = withStore ?? MemoryAuthStore();
     provider = FakeIdentityProvider();
     crypto = CryptoBox(config.secret);
     tokens = TokenService(
@@ -525,4 +525,52 @@ void main() {
       expect(token.secretHash, isEmpty);
     });
   });
+
+  group('a store fault while checking the owner', () {
+    test('answers the pub client with its own refusal, not a 500', () async {
+      // `dart pub` is told what is wrong through the 401 this refusal becomes
+      // — a message it prints back to whoever ran the publish. An exception
+      // escaping the check instead gave them an opaque server error, from a
+      // server that knew perfectly well what to say.
+      var failing = _StoreThatCannotRecord();
+      build(makeConfig(), failing);
+      var owner = await seedUser(withRefreshToken: true);
+      var issued = await tokens.issuePersonal(owner: owner, name: 'ci');
+      // Past `--auth-revalidate-hard`, so the check has to be current before
+      // anything is served and its writes sit on the request path.
+      await store.recordValidation('user-1',
+          validatedAt: DateTime.fromMillisecondsSinceEpoch(0));
+      failing.broken = true;
+
+      var result = await tokens.resolve(issued.value);
+      expect(result.isAccepted, isFalse);
+      expect(result.message, contains('try again in a moment'));
+    });
+  });
+}
+
+/// A store whose validation write fails from the moment [broken] is set, the
+/// way a momentary database fault does.
+class _StoreThatCannotRecord extends MemoryAuthStore {
+  bool broken = false;
+
+  @override
+  Future<void> recordValidation(
+    String id, {
+    DateTime? validatedAt,
+    int? failures,
+    String? refreshTokenEnc,
+    List<String>? groups,
+    String? email,
+    String? displayName,
+  }) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.recordValidation(id,
+        validatedAt: validatedAt,
+        failures: failures,
+        refreshTokenEnc: refreshTokenEnc,
+        groups: groups,
+        email: email,
+        displayName: displayName);
+  }
 }

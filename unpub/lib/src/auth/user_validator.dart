@@ -20,11 +20,35 @@ class ValidationResult {
   /// Whether signing in again is what fixes this.
   final bool recoverable;
 
-  const ValidationResult._(this.user, this.reason, {this.recoverable = false});
+  /// Whether the check could not be run at all, as opposed to reaching a
+  /// verdict about the account.
+  ///
+  /// A refusal either way — a store this server cannot read is no evidence
+  /// that the account is still permitted — but a refusal that says nothing
+  /// about the account must not be acted on as though it did. What acts on
+  /// it is [SessionManager.resolve], which drops the browser's cookie on
+  /// every other refusal because every other refusal means the session is
+  /// finished: blocked, ungrouped, past the deadline. Here the session row
+  /// is perfectly good and this server merely could not read it, so dropping
+  /// the cookie would turn a one-second database fault into a forced
+  /// sign-in for every browser that made a request during it — where the
+  /// same fault, before there was a handler at all, left the cookie alone
+  /// and a reload afterwards simply worked.
+  final bool inconclusive;
+
+  const ValidationResult._(this.user, this.reason,
+      {this.recoverable = false, this.inconclusive = false});
 
   const ValidationResult.ok(StoredUser user) : this._(user, null);
   const ValidationResult.denied(String reason, {bool recoverable = false})
       : this._(null, reason, recoverable: recoverable);
+
+  /// Refused because the check itself could not be completed.
+  ///
+  /// Never [recoverable]: signing in again runs the same check against the
+  /// same store and fails in the same place.
+  const ValidationResult.unavailable(String reason)
+      : this._(null, reason, inconclusive: true);
 
   bool get isAllowed => user != null;
 }
@@ -133,6 +157,69 @@ class UserValidator {
   /// to lose and reaches them within `--auth-revalidate-interval`.
   Future<ValidationResult> ensureValid(StoredUser user,
       {bool interactive = true}) async {
+    try {
+      return await _ensureValid(user, interactive: interactive);
+    } catch (e, stack) {
+      // A store fault, not a verdict. Everything below reads or writes the
+      // account — `setUserStatus`, `revokeUserSessions`, `recordValidation`,
+      // the `getUser` that reads the result back — and none of it used to be
+      // caught anywhere: not here, not in `SessionManager.resolve`, not in
+      // `TokenService.resolve`, not in the gate. A momentary database fault
+      // on any one of them left the request with an unhandled exception, and
+      // a bare 500 is the one answer neither caller can do anything with. The
+      // web UI reports that the server did not answer with JSON; `dart pub`
+      // prints an opaque server error where this server knows perfectly well
+      // what to tell the publisher. Both callers already turn a *refusal*
+      // into something actionable, so the repair is to give them one.
+      //
+      // Refused rather than served. "The database is unreachable" is not
+      // evidence that the account is still permitted, and this is the same
+      // reasoning the hard deadline below rests on: an outage must not become
+      // an indefinite extension for an account that may already have been
+      // revoked.
+      //
+      // Not recoverable, deliberately, so no sign-in is offered. Signing in
+      // again does not fix a store that is down — it would take the same trip
+      // through the identity provider and fail on the same write at the far
+      // end — and offering it invites somebody to spend a minute proving they
+      // are still themselves to answer a question nobody asked. The wording
+      // says the thing that actually helps, which is waiting. It is written
+      // to read sensibly both on the access-denied page and after `dart pub`'s
+      // 401.
+      //
+      // `unavailable` rather than `denied` so that the browser keeps its
+      // cookie: this refusal is about the deployment, and a caller that
+      // treats it as a verdict on the session would make a momentary fault
+      // cost everyone a sign-in. See [ValidationResult.inconclusive].
+      //
+      // Nothing is written down, and in particular no `_refusals` note. That
+      // map is retired only by something that re-establishes the account, so
+      // a note left by a momentary fault would go on refusing the credential
+      // long after the store came back — the account would have to be
+      // confirmed against the provider to clear a verdict the provider never
+      // gave. `_refuse` is the only thing that writes one: its credential
+      // branch touches no store at all, and its interactive branch drops the
+      // note before its first write, so an exception from either leaves the
+      // map clean.
+      //
+      // The queued-behind join is covered by sitting here rather than around
+      // any single call. A second caller that joined a running check inherits
+      // the first one's error through `existing.result.then(...)`, so one
+      // fault can reach several concurrent requests; each of them comes back
+      // through this handler with its own refusal.
+      _log.severe(
+          'could not check ${user.id} against the store; refusing the '
+          'request rather than serving it unchecked',
+          e,
+          stack);
+      return ValidationResult.unavailable(
+          'this server could not confirm your account just now; please try '
+          'again in a moment');
+    }
+  }
+
+  Future<ValidationResult> _ensureValid(StoredUser user,
+      {required bool interactive}) async {
     if (!user.isActive) {
       return ValidationResult.denied(
           user.blockedReason ?? 'access has been withdrawn',

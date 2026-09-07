@@ -41,9 +41,9 @@ void main() {
         revalidateMaxFailures: maxFailures,
       );
 
-  void build(AuthConfig cfg) {
+  void build(AuthConfig cfg, {MemoryAuthStore? withStore}) {
     config = cfg;
-    store = MemoryAuthStore();
+    store = withStore ?? MemoryAuthStore();
     provider = FakeIdentityProvider();
     crypto = CryptoBox(config.secret);
     validator = UserValidator(
@@ -826,6 +826,72 @@ void main() {
       expect(await store.getSession('old'), isNull);
     });
   });
+
+  group('a store fault while the check is running', () {
+    // The sweep was given a `try`/`catch` per user for exactly this, because
+    // an escape there reaches the root zone. The request path, where the same
+    // writes run, was never given the equivalent: `ensureValid` awaited them
+    // bare, and neither `SessionManager.resolve` nor `TokenService.resolve`
+    // nor the gate catches anything — so a momentary database fault came back
+    // as an unhandled exception. What that costs is not the failure but its
+    // shape: both callers already turn a refusal into something the caller
+    // can act on, and a 500 is the one answer neither can.
+    late _StoreThatCannotRecord failing;
+
+    setUp(() {
+      failing = _StoreThatCannotRecord();
+      build(makeConfig(), withStore: failing);
+    });
+
+    test('is refused in words rather than left to escape', () async {
+      var user = await seedUser(age: const Duration(hours: 1));
+      failing.broken = true;
+
+      var result = await validator.ensureValid(user);
+      expect(result.isAllowed, isFalse,
+          reason: 'a store that cannot answer is not evidence that the '
+              'account is still allowed');
+      expect(result.reason, contains('try again in a moment'));
+      // No sign-in offered. It would take the same trip through the identity
+      // provider and fail on the same write at the far end, so the prompt
+      // asks somebody to spend a minute answering a question nobody asked.
+      expect(result.recoverable, isFalse);
+    });
+
+    test('refuses a credential without remembering the refusal', () async {
+      var user = await seedUser(age: const Duration(hours: 1));
+      failing.broken = true;
+
+      expect((await validator.ensureValid(user, interactive: false)).isAllowed,
+          isFalse);
+
+      // The note in `_refusals` is retired only by something that
+      // re-establishes the account, so one written for a database fault would
+      // go on refusing the credential long after the store came back —
+      // demanding the account be confirmed against the provider to clear a
+      // verdict the provider never gave.
+      failing.broken = false;
+      expect((await validator.ensureValid(user, interactive: false)).isAllowed,
+          isTrue);
+    });
+
+    test('is refused for the check queued behind it too', () async {
+      var user = await seedUser(age: const Duration(hours: 1));
+      failing.broken = true;
+
+      // The browser's check cannot join a credential check's answer, so it
+      // queues behind it — and inherits its error through
+      // `existing.result.then(...)`. One fault therefore reaches both
+      // requests, and both have to come back with a refusal of their own.
+      var credential = validator.ensureValid(user, interactive: false);
+      var browser = validator.ensureValid(user);
+
+      expect((await credential).isAllowed, isFalse);
+      var joined = await browser;
+      expect(joined.isAllowed, isFalse);
+      expect(joined.reason, contains('try again in a moment'));
+    });
+  });
 }
 
 /// Lets an unawaited background revalidation run to the end.
@@ -848,5 +914,31 @@ class _CountingStore extends MemoryAuthStore {
   Future<List<StoredToken>> serviceTokensForEmail(String email) {
     addressLookups++;
     return super.serviceTokensForEmail(email);
+  }
+}
+
+/// A store whose validation write fails from the moment [broken] is set, the
+/// way a momentary database fault does.
+class _StoreThatCannotRecord extends MemoryAuthStore {
+  bool broken = false;
+
+  @override
+  Future<void> recordValidation(
+    String id, {
+    DateTime? validatedAt,
+    int? failures,
+    String? refreshTokenEnc,
+    List<String>? groups,
+    String? email,
+    String? displayName,
+  }) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.recordValidation(id,
+        validatedAt: validatedAt,
+        failures: failures,
+        refreshTokenEnc: refreshTokenEnc,
+        groups: groups,
+        email: email,
+        displayName: displayName);
   }
 }

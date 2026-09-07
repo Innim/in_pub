@@ -653,7 +653,20 @@ class AuthRoutes {
     var days = _daysField(body, 'lifetimeDays', 90);
     var lifetime = days == 0 ? null : Duration(days: days);
 
-    late IssuedToken issued;
+    // Not `late`, and not assigned from inside a closure. This used to be a
+    // `late IssuedToken` that the service branch filled in from the callback
+    // handed to [_whileClaiming], which held together only because that
+    // helper either runs the closure or throws. Nothing said so to the
+    // compiler: a later change making it swallow an error from the request
+    // queued ahead — a perfectly reasonable robustness change, since somebody
+    // else's failure is not this request's problem — would have thrown
+    // `LateInitializationError` *after* `issueService` had written a live
+    // token row. The caller would get a 500, never see the one-time secret,
+    // and the account would be left holding a working credential nobody knows
+    // about; only its hash is stored, so the value could not be recovered.
+    // Both branches now assign it directly, and the address check refuses the
+    // way the writer already does.
+    IssuedToken issued;
     try {
       if (_stringField(body, 'kind') == 'service') {
         if (!config.isAdmin(user.groups)) {
@@ -671,22 +684,24 @@ class AuthRoutes {
         // That address is what a publish is recorded as and what the package's
         // uploader list is checked against, so handing out somebody else's
         // would turn "may manage sessions" into "may publish as anyone".
-        var refusal = await _whileClaiming(email, () async {
+        //
+        // The claim has to cover the check and the write together, so both
+        // live in the closure — but the token it produces is returned from it
+        // rather than assigned through it, which is what lets `issued` be an
+        // ordinary local. A refusal leaves by the same door the writer's own
+        // refusals use, so the two arrive at one handler instead of two
+        // identical ones.
+        issued = await _whileClaiming(email, () async {
           var refusal = await _checkServiceAddress(email);
-          if (refusal != null) return refusal;
-          issued = await tokens.issueService(
+          if (refusal != null) throw TokenIssueRefused(refusal);
+          return await tokens.issueService(
             createdBy: user.id,
             name: name,
             email: email,
             displayName: name,
             lifetime: lifetime,
           );
-          return null;
         });
-        if (refusal != null) {
-          return _apiError(refusal,
-              status: HttpStatus.forbidden, cookies: guard.result!.cookies);
-        }
       } else {
         issued = await tokens.issuePersonal(
             owner: user, name: name, lifetime: lifetime);
@@ -695,7 +710,10 @@ class AuthRoutes {
       // The identity a token would carry is refused by the thing that writes
       // it, not only by the screen in front: a personal token copies its
       // address off the account, and nothing on this path had ever looked at
-      // it.
+      // it. `_checkServiceAddress` answers here too — the response is the
+      // same 403 carrying the same wording either way, and routing its
+      // refusal through the writer's exception is what keeps the token itself
+      // out of the closure that claims the address.
       _log.warning('refused a token for ${user.id}: ${e.message}');
       return _apiError(e.message,
           status: HttpStatus.forbidden, cookies: guard.result!.cookies);
@@ -981,10 +999,30 @@ class AuthRoutes {
     // One more than shown, so a full page can be told from a page that
     // happens to end exactly at the limit.
     const shown = 200;
-    var (counts, userRows) = await (
-      store.liveSessionCounts(config.sessionIdle),
-      store.listUsers(limit: shown + 1)
-    ).wait;
+    Map<String, int> counts;
+    List<StoredUser> userRows;
+    try {
+      (counts, userRows) = await (
+        store.liveSessionCounts(config.sessionIdle),
+        store.listUsers(limit: shown + 1)
+      ).wait;
+    } on ParallelWaitError catch (e) {
+      // The same handler `_accountViewOf` carries, and needed rather more
+      // here: `_adminAct` commits the block, the unblock or the end-sessions
+      // write and *then* asks for this view. A fault in either query after
+      // that point escaped as a bare 500 — and the web client only reads 401
+      // and 403 as refusals, so an administrator whose block had taken effect
+      // was told the server did not answer with JSON. The wording says the
+      // read failed and stops short of claiming anything about the action,
+      // which is the honest thing to say from a method that does not know
+      // whether there was one.
+      _log.severe('could not read the administration view for '
+          '${result.user!.id}: ${e.errors}');
+      return _apiError(
+          'The list of users could not be read just now. Please try again.',
+          status: HttpStatus.serviceUnavailable,
+          cookies: result.cookies);
+    }
     var truncated = userRows.length > shown;
     if (truncated) userRows = userRows.sublist(0, shown);
     var users = userRows

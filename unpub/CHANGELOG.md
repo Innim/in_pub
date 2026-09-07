@@ -1,6 +1,7 @@
 ## Unreleased
 
 ### Fixed
+- A database fault while a request is being checked is answered in words instead of escaping as a bare 500: the browser gets the refusal its front end renders and `dart pub` gets the 401 it prints back, both asking for a retry, and the browser keeps its session cookie so a reload once the store recovers is all it takes. The administration screen no longer reports that a block failed when only the list of users could not be read afterwards.
 - A browser is no longer accused of holding a cloned cookie because two of its requests crossed the session-secret rotation boundary. A request that arrived on the previous secret re-issued a third one, pushing the secret already delivered to the browser out of both slots; it is now served on what it presented and nothing is written.
 - Removing the last uploader of a package is refused instead of committed: an empty uploader list left the package impossible to publish to, delete from or add an uploader back to, short of editing the database.
 - A credential check no longer blocks the account or ends its browser sessions: one `dart pub publish` from CI signed the owner out of every browser they had open, over evidence that can be a raced refresh token. The credential is still refused, and the block is left to the next sign-in or to the sweep. The administration screen calls that state "no longer authorised" rather than "revoked by provider", since a `--auth-allowed-groups` change made here reaches it too.

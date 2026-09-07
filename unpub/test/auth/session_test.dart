@@ -48,9 +48,9 @@ void main() {
         revalidateHard: const Duration(days: 365),
       );
 
-  void build(AuthConfig cfg) {
+  void build(AuthConfig cfg, {MemoryAuthStore? withStore}) {
     config = cfg;
-    store = MemoryAuthStore();
+    store = withStore ?? MemoryAuthStore();
     provider = FakeIdentityProvider();
     var crypto = CryptoBox(config.secret);
     sessions = SessionManager(
@@ -475,4 +475,95 @@ void main() {
       expect(store.sessions.values.single.isRevoked, isTrue);
     });
   });
+
+  group('a store fault while revalidating', () {
+    test('ends the request in a refusal the front end can render', () async {
+      // The web UI reads a refusal and shows the reason; it has nothing to do
+      // with an exception that escaped the check, which reaches the screen as
+      // "the server did not answer with JSON".
+      var failing = _StoreThatCannotWrite();
+      build(makeConfig(), withStore: failing);
+      var cookie = await signIn();
+      // Past `--auth-revalidate-hard`, so the check runs in front of the
+      // request. The account has no refresh token, so it reaches for
+      // `setUserStatus` — one of the writes that used to escape.
+      await store.recordValidation('user-1',
+          validatedAt: DateTime.fromMillisecondsSinceEpoch(0));
+      failing.broken = true;
+
+      var result = await sessions.resolve(request(cookie));
+      expect(result.outcome, SessionOutcome.denied,
+          reason: 'a plain refusal: a sign-in would take the same trip and '
+              'fail on the same write');
+      expect(result.message, contains('try again in a moment'));
+    });
+
+    test('leaves the cookie alone, so a reload once it clears just works',
+        () async {
+      // The one thing this refusal must not do. Every other refusal ends the
+      // session, so the cookie goes with it; this one says nothing about the
+      // session at all, and dropping the cookie would charge a one-second
+      // database fault to every browser that made a request during it.
+      var failing = _StoreThatCannotWrite();
+      build(makeConfig(), withStore: failing);
+      var cookie = await signIn();
+      // Backdated past `--auth-revalidate-hard`, and given something to
+      // re-check with, so that once the fault clears the check can actually
+      // reach a clean answer — which is the half of this the cookie has to
+      // survive for.
+      await store.upsertUser(
+          const AuthenticatedUser(
+              id: 'user-1',
+              email: 'someone@example.org',
+              displayName: 'Someone',
+              groups: ['developers']),
+          refreshTokenEnc: CryptoBox(config.secret).encrypt('refresh-1'),
+          validatedAt: DateTime.fromMillisecondsSinceEpoch(0));
+      failing.broken = true;
+
+      var refused = await sessions.resolve(request(cookie));
+      expect(refused.outcome, SessionOutcome.denied);
+      expect(refused.cookies, isEmpty,
+          reason: 'the session row is live; only the read of it failed');
+      expect(store.sessions[sessionIdOf(cookie)]!.isRevoked, isFalse);
+
+      failing.broken = false;
+      expect(
+          (await sessions.resolve(request(cookie))).outcome, SessionOutcome.ok,
+          reason: 'the same cookie, once the store answers again');
+    });
+  });
+}
+
+/// A store whose account writes fail from the moment [broken] is set, the way
+/// a momentary database fault does.
+class _StoreThatCannotWrite extends MemoryAuthStore {
+  bool broken = false;
+
+  @override
+  Future<void> setUserStatus(String id, UserStatus status,
+      {String? reason}) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.setUserStatus(id, status, reason: reason);
+  }
+
+  @override
+  Future<void> recordValidation(
+    String id, {
+    DateTime? validatedAt,
+    int? failures,
+    String? refreshTokenEnc,
+    List<String>? groups,
+    String? email,
+    String? displayName,
+  }) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.recordValidation(id,
+        validatedAt: validatedAt,
+        failures: failures,
+        refreshTokenEnc: refreshTokenEnc,
+        groups: groups,
+        email: email,
+        displayName: displayName);
+  }
 }

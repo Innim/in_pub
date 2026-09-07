@@ -827,6 +827,40 @@ void main() {
       expect((await browse('/auth/admin', cookies: jar)).headers['location'],
           '/admin');
     });
+
+    test('is not told a block failed when only the view could not be read',
+        () async {
+      // `_adminAct` commits the write and then answers with the refreshed
+      // view. A fault in one of that view's two queries lands after the block
+      // has taken effect, and left to escape it came back as a bare 500 —
+      // which the web client reads as neither a refusal nor data, so the
+      // screen said the server had not answered with JSON while the person
+      // it named was in fact blocked.
+      var broken = _StoreThatCannotCountSessions();
+      build(withStore: broken);
+      provider.profile = const AuthenticatedUser(
+          id: 'admin-1',
+          email: 'boss@example.org',
+          displayName: 'Boss',
+          groups: ['developers', 'pubadmins']);
+      var adminJar = await signIn();
+      provider.profile = const AuthenticatedUser(
+          id: 'user-2', email: 'other@example.org', displayName: 'Other');
+      await signIn();
+      var view = await adminView(adminJar);
+      broken.broken = true;
+
+      var res =
+          await act(adminJar, view['csrfToken'] as String, 'user-2', 'block');
+
+      expect(res.statusCode, HttpStatus.serviceUnavailable);
+      expect(
+          (json.decode(await res.readAsString())
+              as Map<String, dynamic>)['error'],
+          contains('could not be read'));
+      expect(store.users['user-2']!.status, UserStatus.blockedLocal,
+          reason: 'the block landed; only the read after it did not');
+    });
   });
 
   group('a non-administrator', () {
@@ -1443,4 +1477,19 @@ class _StoreThatCannotListSessions extends MemoryAuthStore {
   @override
   Future<List<StoredSession>> listUserSessions(String userId) async =>
       throw StateError('the database is unreachable');
+}
+
+/// A store that cannot count live sessions from the moment [broken] is set.
+///
+/// Deferred rather than broken from the start: the administration view is
+/// also where the anti-forgery token comes from, so the test has to read it
+/// once before the fault begins.
+class _StoreThatCannotCountSessions extends MemoryAuthStore {
+  bool broken = false;
+
+  @override
+  Future<Map<String, int>> liveSessionCounts(Duration idle) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.liveSessionCounts(idle);
+  }
 }

@@ -265,7 +265,20 @@ class SessionManager {
           validation.recoverable
               ? SessionOutcome.revoked
               : SessionOutcome.denied,
-          cookies: [_deleteCookie()],
+          // The cookie goes only when the session is actually finished.
+          // Every verdict about the account is that — blocked, no longer in
+          // an allowed group, past the revalidation deadline — and leaving a
+          // dead cookie in the jar only has the browser present it again.
+          //
+          // An inconclusive answer is not one of those. The row is live and
+          // this server simply could not read it, so dropping the cookie
+          // would charge a momentary database fault to every browser that
+          // happened to make a request during it: a forced sign-in each,
+          // where the same fault used to leave the jar alone and a reload
+          // afterwards just worked. The outcome is unchanged, so the person
+          // still sees the refusal and its wording — which asks them to try
+          // again, and now that is all it takes.
+          cookies: validation.inconclusive ? const [] : [_deleteCookie()],
           message: validation.reason);
     }
     // Checked here as well as during revalidation, so that tightening the
