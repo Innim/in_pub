@@ -1,4 +1,4 @@
-## Unreleased
+## 3.5.1
 
 ### Added
 - `--auth-credential-cache`, how long an accepted bearer credential may be answered again from memory before the account behind it is read afresh. Defaults to `5s`; `0` turns it off. Checking a credential costs two database reads and one `dart pub get` over a workspace makes hundreds of gated requests. Refusals are never held, and revoking a token, blocking an account or any refusal the revalidator reaches drops what this server remembers at once, so those land on the very next request; the window bounds only what changes behind this process's back.
