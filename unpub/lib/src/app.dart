@@ -15,6 +15,7 @@ import 'package:archive/archive.dart';
 import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/models.dart';
 import 'package:in_pub/unpub_api/lib/models.dart';
+import 'package:in_pub/unpub_api/lib/spa_routes.dart';
 import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
 import 'package:in_pub/src/doc_store.dart';
@@ -34,10 +35,11 @@ part 'app.g.dart';
 
 /// Client-side routes that only mean anything once `--auth` is on.
 ///
-/// Named so the test that walks the shell routes reads the same list the
-/// server does; the `@Route.get` annotations on [App.indexHtml] still have
-/// to be kept in step by hand, because they are compiled into the router.
-const authOnlyRoutes = {'/account', '/admin'};
+/// The same set the web UI is built from: [SpaRoutePaths] is the single
+/// declaration, in the package both this server and `unpub_web` depend on,
+/// and the `@Route.get` annotations on [App.indexHtml] name its constants
+/// too. Nothing here is kept in step by hand any more.
+const authOnlyRoutes = SpaRoutePaths.authOnly;
 
 class App {
   static const proxyOriginHeader = "proxy-origin";
@@ -1362,14 +1364,21 @@ class App {
   /// a pasted link, a reload, a redirect from elsewhere on the server — hits
   /// the router instead of the application and comes back "not found". The
   /// list is deliberately explicit rather than a catch-all, so a genuinely
-  /// wrong url still says so; the price is that it has to be kept in step
-  /// with `unpub_web/lib/src/routes.dart`.
-  @Route.get('/')
-  @Route.get('/packages')
-  @Route.get('/packages/<name>')
-  @Route.get('/packages/<name>/versions/<version>')
-  @Route.get('/account')
-  @Route.get('/admin')
+  /// wrong url still says so.
+  ///
+  /// An annotation is read by a code generator, so its argument has to be a
+  /// compile-time constant and cannot be a loop over a list. Naming the
+  /// constants of [SpaRoutePaths] gets the same effect: the strings the
+  /// generator writes into `app.g.dart` are the ones the web UI is built
+  /// from, and `spa_routes_test.dart` fails if an entry here and the shared
+  /// list stop agreeing. The order matches `SpaRoutePaths.all`, which is the
+  /// client-side router's; this one anchors each pattern and does not care.
+  @Route.get(SpaRoutePaths.home)
+  @Route.get(SpaRoutePaths.account)
+  @Route.get(SpaRoutePaths.admin)
+  @Route.get(SpaRoutePaths.list)
+  @Route.get(SpaRoutePaths.detailVersion)
+  @Route.get(SpaRoutePaths.detail)
   Future<shelf.Response> indexHtml(shelf.Request req) async {
     // The account and administration screens exist only when there is
     // something to account for. Serving them otherwise gives a page whose

@@ -90,12 +90,17 @@ Router _$AppRouter(App service) {
   );
   router.add(
     'GET',
-    r'/packages',
+    r'/account',
     service.indexHtml,
   );
   router.add(
     'GET',
-    r'/packages/<name>',
+    r'/admin',
+    service.indexHtml,
+  );
+  router.add(
+    'GET',
+    r'/packages',
     service.indexHtml,
   );
   router.add(
@@ -105,12 +110,7 @@ Router _$AppRouter(App service) {
   );
   router.add(
     'GET',
-    r'/account',
-    service.indexHtml,
-  );
-  router.add(
-    'GET',
-    r'/admin',
+    r'/packages/<name>',
     service.indexHtml,
   );
   router.add(
