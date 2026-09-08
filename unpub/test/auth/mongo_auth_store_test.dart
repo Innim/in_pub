@@ -2,6 +2,10 @@ import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/identity.dart';
 import 'package:in_pub/src/auth/mongo_auth_store.dart';
 import 'package:mongo_dart/mongo_dart.dart';
+// The only way this driver version will send a command the modern way. See
+// `runCommand` below for why the public helpers are not usable here.
+// ignore: implementation_imports
+import 'package:mongo_dart/src/database/message/mongo_modern_message.dart';
 import 'package:test/test.dart';
 
 import 'memory_auth_store.dart';
@@ -342,7 +346,89 @@ void main() {
     });
   });
 
+  group('the indexes the queries need', () {
+    /// Sends [command] as OP_MSG.
+    ///
+    /// `Db.executeDbCommand` and `DbCollection.getIndexes` both still write
+    /// OP_QUERY, which MongoDB dropped in 5.1: against a modern server the
+    /// first fails with `UnsupportedOpQueryCommand` and the second quietly
+    /// answers with nothing at all. That made these two tests pass against
+    /// the 5.0 a developer runs locally and fail on CI's 7, reporting no
+    /// indexes on a collection that had just been given them.
+    Future<Map<String, Object?>> runCommand(Map<String, Object> command) =>
+        db.executeModernMessage(
+            MongoModernMessage({...command, r'$db': db.databaseName!}));
+
+    /// Removes every index but `_id`, so that what [MongoAuthStore.ensureIndexes]
+    /// declares is what these tests see.
+    ///
+    /// The test database outlives a run, and an index it created on an
+    /// earlier one stays there: without this the assertions below would hold
+    /// on any machine that had ever run the build that lacked them.
+    Future<void> dropIndexes(String collection) async {
+      try {
+        // A collection this database has never held reports `ok: 0` rather
+        // than throwing, which is just as good an answer: nothing to drop.
+        await runCommand({'dropIndexes': collection, 'index': '*'});
+      } catch (_) {}
+    }
+
+    setUp(() async {
+      await dropIndexes(authSessionCollection);
+      await dropIndexes(authTokenCollection);
+    });
+
+    /// Every field any index on [collection] is keyed by.
+    Future<Set<String>> indexedFields(String collection) async {
+      // `$indexStats` rather than `getIndexes`, for the reason above.
+      var indexes = await db.collection(collection).modernAggregate([
+        {r'$indexStats': <String, dynamic>{}}
+      ]).toList();
+      return indexes
+          .expand((index) => (index['key'] as Map).keys)
+          .whereType<String>()
+          .toSet();
+    }
+
+    test('cover both range fields the session sweep asks about', () async {
+      // The sweep deletes on `expiresAt < now OR lastSeenAt < now - idle`,
+      // and MongoDB uses indexes for an `$or` only when every branch has
+      // one. A missing index on the second field is therefore not a slower
+      // sweep but a full scan of the collection on every tick — and
+      // `_liveSessions` filters on it as well, which is every load of the
+      // account and administration screens.
+      await store.ensureIndexes();
+
+      expect(await indexedFields(authSessionCollection),
+          containsAll(<String>['expiresAt', 'lastSeenAt']));
+    });
+
+    test('and the address a service token is looked up by', () async {
+      // `serviceTokensForEmail` runs on the sign-in path. Answering it by
+      // regex meant scanning every token row, revoked ones included, so the
+      // cost grew with how often tokens were rotated.
+      await store.ensureIndexes();
+
+      expect(await indexedFields(authTokenCollection), contains('emailKey'));
+    });
+  });
+
   group('service tokens by address', () {
+    /// A row as a build before the folding wrote it: the address exactly as
+    /// somebody typed it, and no folded key at all.
+    Future<void> seedLegacyServiceToken(String email,
+            {String id = 'legacy-tok'}) =>
+        db.collection(authTokenCollection).insertOne(<String, dynamic>{
+          '_id': id,
+          'secretHash': 'hash',
+          'kind': TokenKind.service.name,
+          'email': email,
+          'displayName': 'CI',
+          'name': 'legacy ci',
+          'createdBy': 'admin-1',
+          'createdAt': DateTime.now().toUtc(),
+        });
+
     Future<void> seedServiceToken(String email, {String id = 'tok-1'}) =>
         store.createToken(StoredToken(
           id: id,
@@ -431,6 +517,109 @@ void main() {
           (await store.serviceTokensForEmail('ci@example.org'))
               .map((t) => t.id),
           unorderedEquals(<String>['tok-1', 'tok-2']));
+    });
+
+    test('a row written now carries the folded key the lookup asks for',
+        () async {
+      // The whole point of the field: without it the lookup falls back to
+      // the pattern, which no index can serve.
+      await seedServiceToken(' CI@Example.org ');
+
+      expect(
+          (await db
+              .collection(authTokenCollection)
+              .findOne(where.eq('_id', 'tok-1')))!['emailKey'],
+          'ci@example.org');
+    });
+
+    test('and one written before the folding is still found beside it',
+        () async {
+      // The indexed key answers for every row this build writes. A row from
+      // before it carries none, and reading "no such token" off a missing
+      // field is exactly how a second credential for one identity gets
+      // issued — so the address itself is still matched, over those rows
+      // alone.
+      await seedLegacyServiceToken(' CI@Example.org ');
+      await seedServiceToken('ci@example.org', id: 'tok-1');
+
+      expect(
+          (await store.serviceTokensForEmail('ci@example.org'))
+              .map((t) => t.id),
+          unorderedEquals(<String>['tok-1', 'legacy-tok']));
+      expect(await store.serviceTokensForEmail('other@example.org'), isEmpty);
+    });
+
+    test('unless it is revoked, as for any other row', () async {
+      await seedLegacyServiceToken('ci@example.org');
+      await store.revokeToken('legacy-tok', 'no longer needed');
+
+      expect(await store.serviceTokensForEmail('ci@example.org'), isEmpty);
+    });
+  });
+
+  group("a user's sessions", () {
+    Future<void> seedSession(String id,
+        {String userId = 'user-1',
+        Duration since = Duration.zero,
+        Duration ttl = const Duration(days: 7),
+        DateTime? revokedAt}) {
+      var now = DateTime.now().toUtc();
+      return store.createSession(StoredSession(
+        id: id,
+        userId: userId,
+        secretHash: 'hash',
+        rotatedAt: now,
+        uaHash: 'ua',
+        ip: '10.0.0.1',
+        createdAt: now.subtract(since),
+        lastSeenAt: now.subtract(since),
+        expiresAt: now.add(ttl),
+        revokedAt: revokedAt,
+      ));
+    }
+
+    const idle = Duration(hours: 8);
+
+    test('are the ones the rest of the store also calls live', () async {
+      // The listing spelled "live" out itself and left the idle window off,
+      // so the account screen re-applied that half in Dart while the
+      // administration screen took it from `_liveSessions`. Two screens
+      // disagreeing about a session by exactly the window an operator
+      // configures.
+      await seedSession('fresh');
+      await seedSession('idle', since: const Duration(hours: 9));
+      await seedSession('expired', ttl: const Duration(days: -1));
+      await seedSession('revoked', revokedAt: DateTime.now().toUtc());
+
+      expect((await store.listUserSessions('user-1', idle)).map((s) => s.id),
+          ['fresh']);
+      expect(await store.liveSessionCounts(idle), {'user-1': 1},
+          reason: 'and the administration screen counts the same one');
+    });
+
+    test('and the double agrees', () async {
+      var double = MemoryAuthStore();
+      var now = DateTime.now().toUtc();
+      for (var entry in {
+        'fresh': Duration.zero,
+        'idle': const Duration(hours: 9)
+      }.entries) {
+        await double.createSession(StoredSession(
+          id: entry.key,
+          userId: 'user-1',
+          secretHash: 'hash',
+          rotatedAt: now,
+          uaHash: 'ua',
+          ip: '10.0.0.1',
+          createdAt: now.subtract(entry.value),
+          lastSeenAt: now.subtract(entry.value),
+          expiresAt: now.add(const Duration(days: 7)),
+        ));
+      }
+
+      expect((await double.listUserSessions('user-1', idle)).map((s) => s.id),
+          ['fresh']);
+      expect(await double.liveSessionCounts(idle), {'user-1': 1});
     });
   });
 }

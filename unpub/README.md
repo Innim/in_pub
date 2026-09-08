@@ -150,10 +150,11 @@ in_pub --auth \
 | `--auth-allowed-groups` | Comma-separated groups allowed in. Empty means any account on the issuer. |
 | `--auth-admin-groups` | Groups whose members may manage other people's sessions at `/auth/admin`. |
 | `--auth-trusted-proxies` | Addresses allowed to set `X-Forwarded-For`. Required behind a reverse proxy. |
-| `--auth-protect-pub-api` | Require a token for `dart pub get` too. Off by default; see below. Also closes `/badge`, which otherwise reveals which packages exist and their latest versions — pass `--auth-public-badges` to keep it open anyway. What this closes is who may *ask*: a badge is answered with a redirect to `img.shields.io` carrying the package name and its latest version, so an authorized viewer's browser still hands both to that third party. Closing badges stops anonymous enumeration, not disclosure to shields.io. `/logo` stays public either way: it is the same image whatever is hosted here. |
+| `--auth-protect-pub-api` | Require a token for `dart pub get` too. Off by default; see below. Also closes `/badge`, which otherwise reveals which packages exist and their latest versions — pass `--auth-public-badges` to keep it open anyway. What this closes is who may *ask*: a badge is answered with a redirect to `img.shields.io` carrying the package name and its latest version, so an authorized viewer's browser still hands both to that third party. Closing badges stops anonymous enumeration, not disclosure to shields.io. `/logo` stays public either way: it is the same image whatever is hosted here. Generated API documentation is the exception in the other direction: it is gated whenever `--auth` is on, with or without this flag, since it is built from a private package's source. |
 | `--no-google-auth` | Stop accepting the original Google credential for publishing. |
 | `--auth-insecure-cookie` | Drops `Secure` from cookies so the flow works over plain http. Local testing only. It is a cookie attribute and nothing more; it does not open cross-origin access. |
 | `--auth-dev-origins` | Comma-separated origins allowed to read the JSON endpoints cross-origin, on top of `--auth-public-url` (e.g. `http://localhost:8080`). Each one is credentialed access to whatever a visitor's cookies open, so this is for a development tool on another port and nothing else. Needs `--auth`: without it nothing consults these origins, so passing them stops the server rather than reading as though it configured something. An entry that is not an origin stops the server. |
+| `--auth-credential-cache` | How long an *accepted* bearer credential may be answered again from memory before the account behind it is read afresh. Defaults to `5s`; `0` turns it off. Checking a credential costs two database reads, and one `dart pub get` over a workspace makes hundreds of gated requests. Refusals are never held, so blocking an account stops it on the very next request; revoking a token, blocking a user and every refusal the revalidator reaches drop what this server remembers about them at once. What the window bounds is only what changes behind this process's back — a row edited in the database, or a second server sharing it. Must not exceed `--auth-revalidate-interval`, and needs `--auth`: without it no credential is resolved against an account, so passing it stops the server rather than reading as though it configured something. |
 | `--verbose` / `-v` | Logs the whole exchange with the provider. See [When sign-in does not work](#when-sign-in-does-not-work). |
 
 Two that are easy to miss:
@@ -330,6 +331,8 @@ final app = in_pub.App(
 
 Notes:
 
+- With `--auth` on, documentation needs a credential — a browser session or a bearer token — whether or not
+  `--auth-protect-pub-api` is passed. A token lets a CI job or a docs mirror read it without a browser.
 - A Dart SDK must be available on the server host (to run `dart pub get` and
   `dart doc`). The executable defaults to `dart` on `PATH`; override it with
   `in_pub.DocStore('./unpub-docs', dartExecutable: '/path/to/dart')`.

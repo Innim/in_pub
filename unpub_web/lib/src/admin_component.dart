@@ -113,7 +113,14 @@ class AdminComponent implements OnActivate {
       case 'blockedLocal':
         return 'blocked here';
       case 'blockedUpstream':
-        return 'revoked by provider';
+        // Not "revoked by provider", which this state cannot promise. It
+        // covers two causes the server has no way to tell apart: the
+        // provider refusing the account, and its groups no longer matching
+        // `--auth-allowed-groups` — and the second is a decision taken here,
+        // possibly by editing a flag, so naming the provider sent
+        // administrators looking for a revocation nobody performed. The
+        // reason line below the tag says which it was.
+        return 'no longer authorised';
       case 'needsSignIn':
         return 'must sign in again';
       default:

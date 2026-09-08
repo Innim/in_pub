@@ -263,8 +263,14 @@ class AdminUser {
 
   /// One of `active`, `blockedLocal`, `blockedUpstream` or `needsSignIn`.
   ///
-  /// The last is not a block: the server has run out of ways to re-check the
-  /// account, and its owner signing in again is what clears it. A client
+  /// `blockedUpstream` is not the same as "the provider revoked them": it is
+  /// also what a group that no longer appears in `--auth-allowed-groups`
+  /// produces, and the two are indistinguishable from here. Present it by
+  /// what it means — access is no longer authorised — and leave the cause to
+  /// [blockedReason].
+  ///
+  /// `needsSignIn` is not a block: the server has run out of ways to
+  /// re-check the account, and its owner signing in again is what clears it. A client
   /// should not offer an administrator a way to "unblock" it, since the
   /// forced revalidation that would trigger writes the same state back.
   String status;

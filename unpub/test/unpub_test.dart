@@ -360,17 +360,45 @@ main() {
         // the same person. Removal resolved one variant and `$pull`ed that
         // exact string: the other entry survived, the person kept publishing,
         // and `dart pub uploader remove` printed success.
+        expect((await addUploader(package0, email2)).statusCode, HttpStatus.ok,
+            reason: 'somebody has to be left, or the removal is refused');
         await _db.collection(packageCollection).updateOne(
             where.eq('name', package0),
             modify.addToSet('uploaders', 'Email0@Example.COM'));
         expect((await _readMeta(package0))['uploaders'],
-            unorderedEquals([email0, 'Email0@Example.COM']));
+            unorderedEquals([email0, 'Email0@Example.COM', email2]));
 
         var res = await removeUploader(package0, email0);
         expect(res.statusCode, HttpStatus.ok);
 
-        expect((await _readMeta(package0))['uploaders'], isEmpty,
+        expect(
+            (await _readMeta(package0))['uploaders'], unorderedEquals([email2]),
             reason: 'a permission reported as withdrawn has to be withdrawn');
+      });
+
+      test('the last uploader is refused, however many ways it is spelled',
+          () async {
+        // Both entries are one person — the pair the old literal-compare
+        // write path produced, so the oldest packages are the likeliest to
+        // hold it — and taking every spelling would empty the list. A
+        // package with no uploaders is frozen: nobody can publish to it,
+        // remove a version from it, or add an uploader back, because
+        // `addUploader` asks the caller to be an uploader already. Only an
+        // edit to the Mongo document undoes that.
+        // Written straight into the document: this is the state a package
+        // arrives in, not one the API can be talked into producing.
+        await _db.collection(packageCollection).updateOne(
+            where.eq('name', package0),
+            modify.set('uploaders', [email0, 'Email0@Example.COM']));
+
+        var res = await removeUploader(package0, email0);
+        expect(res.statusCode, HttpStatus.badRequest);
+        expect(json.decode(res.body)['error']['message'],
+            contains('at least one uploader'));
+
+        expect((await _readMeta(package0))['uploaders'],
+            unorderedEquals([email0, 'Email0@Example.COM']),
+            reason: 'a refused removal removes nothing at all');
       });
     });
 

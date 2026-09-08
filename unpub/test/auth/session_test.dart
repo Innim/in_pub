@@ -48,9 +48,9 @@ void main() {
         revalidateHard: const Duration(days: 365),
       );
 
-  void build(AuthConfig cfg) {
+  void build(AuthConfig cfg, {MemoryAuthStore? withStore}) {
     config = cfg;
-    store = MemoryAuthStore();
+    store = withStore ?? MemoryAuthStore();
     provider = FakeIdentityProvider();
     var crypto = CryptoBox(config.secret);
     sessions = SessionManager(
@@ -257,21 +257,26 @@ void main() {
 
       var retry = await sessions.resolve(request(cookie));
       expect(retry.outcome, SessionOutcome.ok);
-      expect(retry.cookies, isNotEmpty,
-          reason: 'the client must be handed a secret it can actually use');
+      expect(retry.cookies, isEmpty,
+          reason: 'the secret it is already holding is still accepted, and a '
+              'fresh one here would push the secret this server has already '
+              'delivered out of both slots');
 
       var session = await store.getSession(sessionIdOf(cookie));
       expect(session!.isRevoked, isFalse);
     });
 
-    test('recovers: the re-issued secret works', () async {
+    test('keeps working on the secret it holds', () async {
       var cookie = await signIn();
       await sessions.resolve(request(cookie));
-      var retry = await sessions.resolve(request(cookie));
-      var recovered = cookieValue(retry.cookies.single);
 
-      var result = await sessions.resolve(request(recovered));
-      expect(result.outcome, SessionOutcome.ok);
+      // Several more requests from the same behind client, none of which is
+      // handed anything new: the previous secret carries them until the
+      // grace runs out or the client catches up on its own.
+      for (var i = 0; i < 3; i++) {
+        var result = await sessions.resolve(request(cookie));
+        expect(result.outcome, SessionOutcome.ok, reason: 'request $i');
+      }
     });
 
     test('a burst of parallel requests on one secret is not a clone', () async {
@@ -286,6 +291,78 @@ void main() {
       expect(results.map((r) => r.outcome), everyElement(SessionOutcome.ok));
       var session = await store.getSession(sessionIdOf(cookie));
       expect(session!.isRevoked, isFalse);
+    });
+  });
+
+  group('responses that land out of order', () {
+    /// Truly parallel requests are safe on their own: the compare-and-set
+    /// picks one winner. The dangerous shape is sequential — a request that
+    /// left before the rotation and arrives after it — because it is served
+    /// from a session document that has already moved on, while the browser
+    /// applies the two `Set-Cookie` headers in whatever order they land.
+    test('a straggler does not orphan the secret the browser kept', () async {
+      var s1 = await signIn();
+
+      // A crosses the rotation boundary and is handed the new secret.
+      var a = await sessions.resolve(request(s1));
+      var s2 = cookieValue(a.cookies.single);
+
+      // B left before A's response came back, so it still carries the old
+      // secret. It must be served, and it must not move the session on.
+      var b = await sessions.resolve(request(s1));
+      expect(b.outcome, SessionOutcome.ok);
+      // Read now, because the request below confirms the current secret and
+      // clears the previous slot.
+      var afterStraggler = store.sessions[sessionIdOf(s1)]!;
+
+      // The browser applies B's response first and A's second, so its jar
+      // ends up holding A's secret.
+      var jar = s1;
+      for (var setCookie in [...b.cookies, ...a.cookies]) {
+        jar = cookieValue(setCookie);
+      }
+      expect(jar, s2);
+
+      var next = await sessions.resolve(request(jar));
+      expect(next.outcome, SessionOutcome.ok,
+          reason: 'the browser is holding a secret this server issued and '
+              'never retired; calling that a clone would end the session — '
+              'every session of that user under --auth-reuse-kills-all');
+      expect(store.sessions[sessionIdOf(s1)]!.isRevoked, isFalse);
+
+      // The same thing said structurally: both secrets this server handed
+      // out were still in the document when the straggler was done with it.
+      expect(afterStraggler.secretHash, CryptoBox.hash(s2.split('.').last),
+          reason: 'the secret already delivered must still be the current '
+              'one');
+      expect(afterStraggler.prevSecretHash, CryptoBox.hash(s1.split('.').last),
+          reason: 'and the one the straggler presented must still be the '
+              'previous one');
+      expect(b.cookies, isEmpty,
+          reason: 'a third secret is a secret one of the two live cookies '
+              'must be evicted for');
+    });
+
+    test('a secret this server never issued is still a clone', () async {
+      var s1 = await signIn();
+      var a = await sessions.resolve(request(s1));
+      var s2 = cookieValue(a.cookies.single);
+
+      // Leaves the session in the same state as the test above: two secrets
+      // live, neither retired.
+      await sessions.resolve(request(s1));
+
+      var forged = '${sessionIdOf(s1)}.${CryptoBox.randomToken()}';
+      var result = await sessions.resolve(request(forged));
+
+      expect(result.outcome, SessionOutcome.cloned,
+          reason: 'tolerating the two secrets this server handed out must '
+              'not mean tolerating a third');
+      expect(store.sessions[sessionIdOf(s1)]!.isRevoked, isTrue);
+      expect(
+          (await sessions.resolve(request(s2))).outcome, SessionOutcome.revoked,
+          reason: 'the session is gone for the real client too, which is '
+              'what makes the theft visible');
     });
   });
 
@@ -398,4 +475,95 @@ void main() {
       expect(store.sessions.values.single.isRevoked, isTrue);
     });
   });
+
+  group('a store fault while revalidating', () {
+    test('ends the request in a refusal the front end can render', () async {
+      // The web UI reads a refusal and shows the reason; it has nothing to do
+      // with an exception that escaped the check, which reaches the screen as
+      // "the server did not answer with JSON".
+      var failing = _StoreThatCannotWrite();
+      build(makeConfig(), withStore: failing);
+      var cookie = await signIn();
+      // Past `--auth-revalidate-hard`, so the check runs in front of the
+      // request. The account has no refresh token, so it reaches for
+      // `setUserStatus` — one of the writes that used to escape.
+      await store.recordValidation('user-1',
+          validatedAt: DateTime.fromMillisecondsSinceEpoch(0));
+      failing.broken = true;
+
+      var result = await sessions.resolve(request(cookie));
+      expect(result.outcome, SessionOutcome.denied,
+          reason: 'a plain refusal: a sign-in would take the same trip and '
+              'fail on the same write');
+      expect(result.message, contains('try again in a moment'));
+    });
+
+    test('leaves the cookie alone, so a reload once it clears just works',
+        () async {
+      // The one thing this refusal must not do. Every other refusal ends the
+      // session, so the cookie goes with it; this one says nothing about the
+      // session at all, and dropping the cookie would charge a one-second
+      // database fault to every browser that made a request during it.
+      var failing = _StoreThatCannotWrite();
+      build(makeConfig(), withStore: failing);
+      var cookie = await signIn();
+      // Backdated past `--auth-revalidate-hard`, and given something to
+      // re-check with, so that once the fault clears the check can actually
+      // reach a clean answer — which is the half of this the cookie has to
+      // survive for.
+      await store.upsertUser(
+          const AuthenticatedUser(
+              id: 'user-1',
+              email: 'someone@example.org',
+              displayName: 'Someone',
+              groups: ['developers']),
+          refreshTokenEnc: CryptoBox(config.secret).encrypt('refresh-1'),
+          validatedAt: DateTime.fromMillisecondsSinceEpoch(0));
+      failing.broken = true;
+
+      var refused = await sessions.resolve(request(cookie));
+      expect(refused.outcome, SessionOutcome.denied);
+      expect(refused.cookies, isEmpty,
+          reason: 'the session row is live; only the read of it failed');
+      expect(store.sessions[sessionIdOf(cookie)]!.isRevoked, isFalse);
+
+      failing.broken = false;
+      expect(
+          (await sessions.resolve(request(cookie))).outcome, SessionOutcome.ok,
+          reason: 'the same cookie, once the store answers again');
+    });
+  });
+}
+
+/// A store whose account writes fail from the moment [broken] is set, the way
+/// a momentary database fault does.
+class _StoreThatCannotWrite extends MemoryAuthStore {
+  bool broken = false;
+
+  @override
+  Future<void> setUserStatus(String id, UserStatus status,
+      {String? reason}) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.setUserStatus(id, status, reason: reason);
+  }
+
+  @override
+  Future<void> recordValidation(
+    String id, {
+    DateTime? validatedAt,
+    int? failures,
+    String? refreshTokenEnc,
+    List<String>? groups,
+    String? email,
+    String? displayName,
+  }) async {
+    if (broken) throw StateError('the database is unreachable');
+    return super.recordValidation(id,
+        validatedAt: validatedAt,
+        failures: failures,
+        refreshTokenEnc: refreshTokenEnc,
+        groups: groups,
+        email: email,
+        displayName: displayName);
+  }
 }

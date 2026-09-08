@@ -1,3 +1,4 @@
+import '../address.dart';
 import 'identity.dart';
 
 /// Why a user is currently denied access.
@@ -316,6 +317,19 @@ class StoredToken {
 
   bool isUsable(DateTime now) => !isRevoked && !isExpired(now);
 
+  /// The address folded for comparison, stored beside the original exactly
+  /// as [StoredUser.emailKey] is.
+  ///
+  /// `TokenService._issue` already folds before it writes, so for a row this
+  /// build creates this repeats the address rather than deriving anything
+  /// new. What it adds is a field a query can name and an index can serve:
+  /// the lookup that decides whether a second credential may be issued for
+  /// an identity ran as a case-insensitive regex over every token row, and
+  /// it runs on the sign-in path. A row *without* this field is one written
+  /// before the folding, which is the only kind that still has to be matched
+  /// by pattern.
+  String get emailKey => normalizeAddress(email);
+
   AuthenticatedUser toAuthenticatedUser({List<String> groups = const []}) =>
       AuthenticatedUser(
           id: userId ?? 'token:$id',
@@ -329,6 +343,7 @@ class StoredToken {
         'kind': kind.name,
         'userId': userId,
         'email': email,
+        'emailKey': emailKey,
         'displayName': displayName,
         'name': name,
         'createdBy': createdBy,
@@ -358,55 +373,6 @@ class StoredToken {
         revokedReason: json['revokedReason'] as String?,
       );
 }
-
-/// How this server decides two email addresses are the same one.
-///
-/// Case-folded and trimmed, in one place. It used to be spelled out
-/// separately in `App`, in `MongoAuthStore` and in the uploader-lookup
-/// closure in `bin/in_pub.dart`, and they did not agree: the closure's regex
-/// did not trim, so an uploader entry with a stray space slipped past the
-/// check that stops a service token being given somebody else's address,
-/// while `App` trimmed and let that same token publish as them.
-String normalizeAddress(String email) => email.trim().toLowerCase();
-
-/// The pattern that matches a *stored* address equal to [email], for the two
-/// queries that cannot go through a folded key.
-///
-/// User records written before `emailKey` existed hold only the address as
-/// the provider spelled it, and the uploader arrays in the package metadata
-/// hold whatever an earlier publish recorded — neither is folded, and both
-/// may carry stray whitespace. Callers must ask for a case-insensitive
-/// match; the pattern folds nothing itself.
-///
-/// It exists because this rule was written out by hand in three places and
-/// they did not agree: the uploader lookup did not trim, so an entry with a
-/// stray space slipped past the check that stops a service token being given
-/// somebody else's address, and `findUsersByEmail` did not fold, so a legacy
-/// record matched nothing and a blocked publisher's credential was taken for
-/// one belonging to no account here.
-String storedAddressPattern(String email) =>
-    '^\\s*${RegExp.escape(normalizeAddress(email))}\\s*\$';
-
-/// Enough of a check to catch a name typed where an address belongs.
-///
-/// Deliberately not an attempt at the full grammar — [normalizeAddress], not
-/// this, decides what two addresses being equal means. What it is for is the
-/// value that is not an address at all: a token's address is recorded as the
-/// uploader of everything it publishes and matched against uploader lists,
-/// and an empty one is an identity every account with no `email` claim
-/// shares.
-///
-/// The dot in the domain is required on purpose, and it is the part worth
-/// stating because it refuses things that do exist: `alice@corp`,
-/// `ci@internal`, every single-label intranet name a directory might hold.
-/// Only addresses that could be delivered to are wanted here, so
-/// `dart pub uploader add ops@intranet` is refused — and on a provider that
-/// reports dotless addresses, so is every token an account could create,
-/// which with `--auth-protect-pub-api` leaves that person unable to
-/// authenticate at all. The answer to that is a real address on the
-/// directory entry, not a looser rule here.
-bool looksLikeEmailAddress(String value) =>
-    RegExp(r'^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$').hasMatch(value);
 
 /// Persistence for users, sessions and access tokens.
 ///
@@ -500,15 +466,16 @@ abstract class AuthStore {
   /// The new secret starts out unconfirmed
   /// ([StoredSession.currentSecretSeen] false).
   ///
-  /// [prevSecretHash] is stated explicitly rather than assumed to be the
-  /// expected one: when a client is catching up after missing a cookie
-  /// update, the secret that stays valid is the one it just presented, not
-  /// the one it never received.
+  /// [expectedSecretHash] becomes [StoredSession.prevSecretHash]: the secret
+  /// that was current is exactly the one that stays acceptable. There is no
+  /// parameter for choosing something else, because there is no safe choice —
+  /// the two slots hold the two secrets this server has handed out, and
+  /// putting anything else in the second one strands a cookie a client may
+  /// still be carrying.
   Future<bool> rotateSession(
     String id, {
     required String expectedSecretHash,
     required String newSecretHash,
-    required String prevSecretHash,
     required DateTime prevValidUntil,
     required DateTime rotatedAt,
   });
@@ -538,7 +505,16 @@ abstract class AuthStore {
   Future<int> revokeUserSessions(String userId, String reason,
       {String? exceptSessionId});
 
-  Future<List<StoredSession>> listUserSessions(String userId);
+  /// This user's live sessions: not revoked, not past their expiry, and used
+  /// within [idle].
+  ///
+  /// The idle window is part of the query rather than something the caller
+  /// applies afterwards. It is configuration this layer does not hold, which
+  /// is why it is passed in — but leaving it out meant the account screen
+  /// re-applied it in Dart while `usersWithLiveSessions` and
+  /// [liveSessionCounts] took it from the store, so the two screens decided
+  /// what "live" means by different rules.
+  Future<List<StoredSession>> listUserSessions(String userId, Duration idle);
 
   /// Drops sessions that are past their expiry or idle deadline. Called from
   /// the background sweep.

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:in_pub/in_pub.dart';
+import 'package:in_pub/unpub_api/lib/spa_routes.dart';
 import 'package:path/path.dart' as p;
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:test/test.dart';
@@ -107,13 +108,20 @@ void main() {
     // Every client-side route has to be served the shell, or opening one
     // directly — a pasted link, a reload, a redirect from elsewhere on the
     // server — reaches the router instead of the application and comes back
-    // "not found". Kept in step with unpub_web/lib/src/routes.dart by hand,
-    // which is what this test is for.
-    const clientRoutes = [
-      '/',
-      '/packages',
-      '/packages/my_package',
-      '/packages/my_package/versions/1.0.0',
+    // "not found". Walked from `SpaRoutePaths`, which the router's
+    // annotations and the web application's route table are both built from,
+    // so this cannot be a stale copy of either; `spa_routes_test.dart`
+    // checks that those two still agree with it.
+
+    /// A concrete address for [route], whose parameters are written the way
+    /// the server's router declares them.
+    String sample(String route) => route
+        .replaceAll('<name>', 'my_package')
+        .replaceAll('<version>', '1.0.0');
+
+    final clientRoutes = [
+      for (var route in SpaRoutePaths.all)
+        if (!SpaRoutePaths.authOnly.contains(route)) sample(route),
     ];
 
     /// A server with authentication on, which is what makes these routes
@@ -136,8 +144,8 @@ void main() {
           ),
         );
 
-    // `authOnlyRoutes` comes from the server, so this cannot drift from the
-    // set it actually applies.
+    // `authOnlyRoutes` is `SpaRoutePaths.authOnly`, so this cannot drift
+    // from the set the gate actually applies.
 
     for (var path in clientRoutes) {
       test('is served at $path', () async {

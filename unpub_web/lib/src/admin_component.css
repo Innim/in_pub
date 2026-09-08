@@ -15,11 +15,6 @@
   max-width: 75ch;
 }
 
-.error {
-  color: #c62828;
-  font-weight: 500;
-}
-
 /* A link styled as a button still needs to sit like text does. */
 a.btn {
   display: inline-block;

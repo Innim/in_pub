@@ -30,9 +30,14 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 5.0.6 is what the deployment runs; 7 is what it would be upgraded to.
+        mongo: ["5.0.6", "7"]
     services:
       mongo:
-        image: mongo:7
+        image: mongo:${{ matrix.mongo }}
         ports:
           - 27017:27017
         options: >-

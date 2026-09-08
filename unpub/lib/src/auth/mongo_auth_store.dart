@@ -2,6 +2,7 @@ import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 import 'package:mongo_dart/mongo_dart.dart';
 
+import '../address.dart';
 import 'auth_store.dart';
 import 'identity.dart';
 
@@ -30,12 +31,23 @@ class MongoAuthStore extends AuthStore {
     // index cannot express.
     await db.ensureIndex(authSessionCollection, key: 'userId');
     await db.ensureIndex(authSessionCollection, key: 'expiresAt');
+    // Both are range predicates in the session sweep, exactly as they are in
+    // the token one below — and MongoDB uses indexes for an `$or` only when
+    // every branch has one, so leaving this out made every sweep tick read
+    // the whole collection. `_liveSessions` filters on it as well, so it
+    // earns its keep on the account and administration screens too.
+    await db.ensureIndex(authSessionCollection, key: 'lastSeenAt');
     await db.ensureIndex(authTokenCollection, key: 'userId');
     // `listServiceTokens` filters on this, and it is read every time an
     // administrator opens the account screen.
     await db.ensureIndex(authTokenCollection, key: 'kind');
     // Read on every publish that arrives with the legacy credential.
     await db.ensureIndex(authUserCollection, key: 'emailKey');
+    // And on every first sign-in and every address change, through
+    // `serviceTokensForEmail`. `email` gets none: nothing queries it on its
+    // own any more, and the one query that still names it is a
+    // case-insensitive regex, which no index can serve.
+    await db.ensureIndex(authTokenCollection, key: 'emailKey');
     // Both are range predicates in the token sweep.
     await db.ensureIndex(authTokenCollection, key: 'expiresAt');
     await db.ensureIndex(authTokenCollection, key: 'revokedAt');
@@ -342,7 +354,6 @@ class MongoAuthStore extends AuthStore {
     String id, {
     required String expectedSecretHash,
     required String newSecretHash,
-    required String prevSecretHash,
     required DateTime prevValidUntil,
     required DateTime rotatedAt,
   }) async {
@@ -353,7 +364,7 @@ class MongoAuthStore extends AuthStore {
         where.eq('_id', id).eq('secretHash', expectedSecretHash),
         modify
             .set('secretHash', newSecretHash)
-            .set('prevSecretHash', prevSecretHash)
+            .set('prevSecretHash', expectedSecretHash)
             .set('prevValidUntil', prevValidUntil)
             .set('currentSecretSeen', false)
             .set('rotatedAt', rotatedAt));
@@ -414,18 +425,21 @@ class MongoAuthStore extends AuthStore {
   }
 
   @override
-  Future<List<StoredSession>> listUserSessions(String userId) {
+  Future<List<StoredSession>> listUserSessions(String userId, Duration idle) {
     // Live rows only, decided by the query. The account screen dropped the
     // revoked and expired ones in Dart afterwards, so every load shipped
     // every session the user had ever held that the sweep had not yet caught
     // — which for somebody signing in and out repeatedly is the whole
     // `sessionTtl` window. The same treatment the token listings got.
-    var now = DateTime.now();
+    //
+    // Through `_liveSessions`, and that is why `idle` is a parameter: this
+    // spelled the rule out itself and left the idle window off, so the
+    // account screen re-applied that half in Dart while the administration
+    // screen took it from the builder. Two answers to "is this session
+    // live", differing by exactly the window an operator configures.
     return _sessions
-        .find(where
+        .find(_liveSessions(DateTime.now(), idle)
             .eq('userId', userId)
-            .eq('revokedAt', null)
-            .gt('expiresAt', now)
             .sortBy('lastSeenAt', descending: true)
             .limit(sessionListLimit))
         .map(StoredSession.fromJson)
@@ -488,12 +502,49 @@ class MongoAuthStore extends AuthStore {
   /// for one address than the listing shows is exactly the one where the
   /// duplicate has already happened.
   @override
-  Future<List<StoredToken>> serviceTokensForEmail(String email) => _tokens
-      .find(_stillLive(where
-          .eq('kind', TokenKind.service.name)
-          .match('email', storedAddressPattern(email), caseInsensitive: true)))
-      .map(StoredToken.fromJson)
-      .toList();
+  Future<List<StoredToken>> serviceTokensForEmail(String email) async {
+    var byKey = await _tokens
+        .find(_stillLive(where
+            .eq('kind', TokenKind.service.name)
+            .eq('emailKey', normalizeAddress(email))))
+        .map(StoredToken.fromJson)
+        .toList();
+
+    // The folded key answers for every row this build writes — `_issue`
+    // folds the address before storing it, and [StoredToken.emailKey] writes
+    // that same value into a field a query can name. It is not the whole
+    // answer: a row written before the folding carries no key at all, and it
+    // is exactly such a row that a second credential for one identity would
+    // hide behind, so the address itself is still checked as well.
+    //
+    // Bounded by `emailKey: null`, the way `findUsersByEmail` bounds its own
+    // legacy query: a case-insensitive regex can use no index, and this runs
+    // on the sign-in path, so left over the whole collection it scanned
+    // every token row — including the revoked ones kept for
+    // `tokenRetention`, which made the cost grow with churn rather than with
+    // the number of live tokens. `emailKey: null` is an indexed predicate,
+    // so what is scanned is the service tokens minted before this build, a
+    // set that does not grow and empties itself as those rows are revoked
+    // and swept.
+    //
+    // No backfill for these, unlike `emailKey` on the user records: a
+    // missing key here costs a bounded scan, while there it decided whether
+    // a blocked publisher's legacy credential was matched at all.
+    var unfolded = await _tokens
+        .find(_stillLive(where
+            .eq('kind', TokenKind.service.name)
+            .eq('emailKey', null)
+            .match('email', storedAddressPattern(email),
+                caseInsensitive: true)))
+        .map(StoredToken.fromJson)
+        .toList();
+
+    // Concatenated rather than merged by `_id`: unlike a user's, a token's
+    // stored key is written once at insert and nothing ever changes it, so
+    // no row can satisfy both predicates and none can move between them
+    // while these two queries run.
+    return [...byKey, ...unfolded];
+  }
 
   /// Narrows [selector] to tokens still worth having: neither revoked nor
   /// expired.

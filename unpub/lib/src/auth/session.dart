@@ -265,7 +265,20 @@ class SessionManager {
           validation.recoverable
               ? SessionOutcome.revoked
               : SessionOutcome.denied,
-          cookies: [_deleteCookie()],
+          // The cookie goes only when the session is actually finished.
+          // Every verdict about the account is that — blocked, no longer in
+          // an allowed group, past the revalidation deadline — and leaving a
+          // dead cookie in the jar only has the browser present it again.
+          //
+          // An inconclusive answer is not one of those. The row is live and
+          // this server simply could not read it, so dropping the cookie
+          // would charge a momentary database fault to every browser that
+          // happened to make a request during it: a forced sign-in each,
+          // where the same fault used to leave the jar alone and a reload
+          // afterwards just worked. The outcome is unchanged, so the person
+          // still sees the refusal and its wording — which asks them to try
+          // again, and now that is all it takes.
+          cookies: validation.inconclusive ? const [] : [_deleteCookie()],
           message: validation.reason);
     }
     // Checked here as well as during revalidation, so that tightening the
@@ -293,18 +306,35 @@ class SessionManager {
         // up, so the old one is retired and any later use of it is a clone.
         await store.confirmSecretSeen(session.id, session.secretHash);
       } else if (now.difference(session.rotatedAt) >= config.sessionRotate) {
-        var rotated =
-            await _rotate(session, now, keepValid: session.secretHash);
+        var rotated = await _rotate(session, now);
         if (rotated != null) cookies.add(rotated);
       }
     } else {
-      // The client is still on the previous secret, so it never received the
-      // current one and we cannot resend it — only its hash is stored. Issue
-      // a fresh secret instead, keeping the one the client actually holds
-      // valid so the rest of an in-flight burst is not mistaken for a clone.
-      _log.fine('session ${session.id} missed a cookie update; re-issuing');
-      var rotated = await _rotate(session, now, keepValid: presented);
-      if (rotated != null) cookies.add(rotated);
+      // The client is still on the previous secret. Nothing is written here,
+      // and in particular the secret is *not* re-issued.
+      //
+      // Re-issuing was tried and is what this branch used to do, keeping the
+      // presented secret as the previous one. It broke the rule the whole
+      // scheme rests on: every secret this server has put in a `Set-Cookie`
+      // must stay current or previous until its grace runs out. The current
+      // secret was, by definition, handed to somebody in the response that
+      // rotated it — a third secret here would push it out of both slots,
+      // and there are only two. Responses do not have to arrive in the order
+      // their requests left: a browser whose jar ends up holding that
+      // orphaned secret would be answered as a cloned cookie on its next
+      // request, ending the session with a theft warning — every session the
+      // person has open, under `--auth-reuse-kills-all`. A page firing
+      // several requests across the rotation boundary is enough to do it.
+      //
+      // Doing nothing leaves both live secrets acceptable, so the rest of an
+      // in-flight burst is fine and so is the browser, whichever response it
+      // applied last. The client that truly never received the current
+      // secret is the one that pays: it keeps working on the previous one
+      // until the grace expires, and is then asked to sign in again. That is
+      // the cost of holding two secrets rather than three, and a re-signin
+      // beats accusing an honest client of theft.
+      _log.fine('session ${session.id} is a request behind the current '
+          'secret; accepted on the previous one');
     }
 
     await _touch(session, now, ip);
@@ -316,16 +346,18 @@ class SessionManager {
   /// Rotates the session secret, returning the cookie to set, or null if
   /// another concurrent request rotated first.
   ///
-  /// [keepValid] is the secret hash that remains acceptable afterwards — the
-  /// one the client is known to hold.
-  Future<String?> _rotate(StoredSession session, DateTime now,
-      {required String keepValid}) async {
+  /// Only ever called for a request that presented the *current* secret, and
+  /// that is the whole discipline: the secret being replaced is both what the
+  /// compare-and-set expects and what stays acceptable as the previous one.
+  /// Rotating away from a secret this request has not seen presented would
+  /// strand it — it was already delivered in the response that created it,
+  /// and a client can still be holding it.
+  Future<String?> _rotate(StoredSession session, DateTime now) async {
     var secret = CryptoBox.randomToken();
     var ok = await store.rotateSession(
       session.id,
       expectedSecretHash: session.secretHash,
       newSecretHash: CryptoBox.hash(secret),
-      prevSecretHash: keepValid,
       prevValidUntil: now.add(config.rotationGrace),
       rotatedAt: now,
     );

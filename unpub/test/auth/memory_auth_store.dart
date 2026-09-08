@@ -1,3 +1,4 @@
+import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/identity.dart';
 import 'package:in_pub/src/auth/mongo_auth_store.dart';
@@ -144,7 +145,6 @@ class MemoryAuthStore extends AuthStore {
     String id, {
     required String expectedSecretHash,
     required String newSecretHash,
-    required String prevSecretHash,
     required DateTime prevValidUntil,
     required DateTime rotatedAt,
   }) async {
@@ -154,7 +154,7 @@ class MemoryAuthStore extends AuthStore {
     }
     sessions[id] = _copySession(session,
         secretHash: newSecretHash,
-        prevSecretHash: prevSecretHash,
+        prevSecretHash: expectedSecretHash,
         prevValidUntil: prevValidUntil,
         currentSecretSeen: false,
         rotatedAt: rotatedAt);
@@ -215,14 +215,19 @@ class MemoryAuthStore extends AuthStore {
   }
 
   @override
-  Future<List<StoredSession>> listUserSessions(String userId) async {
+  Future<List<StoredSession>> listUserSessions(
+      String userId, Duration idle) async {
     // Live rows only, newest first and capped, as the Mongo query returns
     // them. The cap is borrowed from that store rather than re-typed: a
     // number written out twice is the drift this double keeps producing.
+    //
+    // The idle window included, for the same reason: the Mongo query drops
+    // sessions unused for longer than it, so a double that kept them would
+    // have the account screen tested against rows production never returns.
     var now = DateTime.now();
     var live = sessions.values
         .where((s) =>
-            s.userId == userId && !s.isRevoked && s.expiresAt.isAfter(now))
+            s.userId == userId && !s.isRevoked && !s.isExpired(now, idle))
         .toList()
       ..sort((a, b) => b.lastSeenAt.compareTo(a.lastSeenAt));
     return live.take(MongoAuthStore.sessionListLimit).toList();

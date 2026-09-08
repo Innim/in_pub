@@ -1409,6 +1409,14 @@ String content(Map<String, String> vars) => """<!DOCTYPE html>
         background: #fdecea;
         color: #b3261e;
       }
+
+      /* The failure line the account and administration screens put above
+         their content. Identical in both component stylesheets before it
+         came here. */
+      .error {
+        color: #c62828;
+        font-weight: 500;
+      }
     </style>
     <style>
       .markdown-body {

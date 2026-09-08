@@ -255,6 +255,81 @@ void main() {
           isEmpty);
     });
   });
+
+  group('merging Origin into a Vary', () {
+    // The merge runs on every answer this server gives — every static asset,
+    // every 304, every metadata read — so it was rewritten to allocate
+    // nothing in the two cases that are nearly all of them. It decides a
+    // cache key, so the header it emits has to be what it always was, down
+    // to the byte.
+
+    /// The middleware's answer for a handler whose own `Vary` is [stated].
+    Future<String?> emitted(String? stated) async {
+      var handler =
+          App.varyOnOrigin((_) async => shelf.Response.ok('', headers: {
+                if (stated != null) HttpHeaders.varyHeader: stated,
+              }));
+      var response =
+          await handler(shelf.Request('GET', Uri.parse('http://localhost/')));
+      return response.headers[HttpHeaders.varyHeader];
+    }
+
+    /// The implementation as it stood before the fast paths: split the
+    /// header into fields, fold each, and compare. Kept here so the rewrite
+    /// is measured against what it replaced rather than against what
+    /// somebody remembers it did.
+    String? asItWas(String? stated) {
+      var fields = (stated ?? '').split(',').map((f) => f.trim().toLowerCase());
+      if (fields.any((f) => f == 'origin' || f == '*')) return stated;
+      return stated == null || stated.isEmpty ? 'Origin' : '$stated, Origin';
+    }
+
+    test('is byte for byte what splitting the header produced', () async {
+      for (var stated in <String?>[
+        null,
+        '',
+        'Origin',
+        'origin',
+        'ORIGIN',
+        '*',
+        'Authorization',
+        'Authorization, Cookie',
+        'authorization,cookie',
+        'Accept-Encoding, Origin',
+        'Origin, Authorization',
+        ' origin ',
+        'Accept-Encoding, *',
+        // Contains the word without listing the field, which is the case a
+        // bare `contains` would get wrong.
+        'X-Origin-Id',
+        'x-origin-id, Cookie',
+        'Cookie,',
+      ]) {
+        expect(await emitted(stated), asItWas(stated),
+            reason: 'Vary: ${stated ?? '<absent>'}');
+      }
+    });
+
+    test('states it where the answer said nothing', () async {
+      expect(await emitted(null), 'Origin');
+    });
+
+    test('keeps what was already stated, spelled as it was', () async {
+      // Overwriting the gate's list would tell a shared cache it may serve
+      // one token holder's private metadata to the next.
+      expect(await emitted('Authorization, Cookie'),
+          'Authorization, Cookie, Origin');
+    });
+
+    test('leaves an answer that already depends on the origin alone', () async {
+      expect(await emitted('Origin, Authorization'), 'Origin, Authorization');
+      expect(await emitted('*'), '*');
+    });
+
+    test('and a field that merely contains the word does not count', () async {
+      expect(await emitted('X-Origin-Id'), 'X-Origin-Id, Origin');
+    });
+  });
 }
 
 class _UnusedMetaStore extends MetaStore {

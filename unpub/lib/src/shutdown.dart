@@ -27,6 +27,14 @@ class ShutdownHandler {
   /// The shell's convention for a process that ended on SIGINT.
   static const _interruptedExitCode = 130;
 
+  /// A shutdown that did not finish. Plain `1` on purpose: an uncaught Dart
+  /// error leaves 255 and a process killed outright reports 128 + the signal
+  /// number, so an operator reading `systemctl status` can tell a drain or a
+  /// release that failed from a crash and from a kill. The one code that must
+  /// not be used here is 0, which is what this method used to report however
+  /// badly the shutdown had gone.
+  static const _failedExitCode = 1;
+
   final Future<void> Function() _drain;
   final void Function() _release;
   final Future<void> Function() _closeDatabase;
@@ -66,6 +74,8 @@ class ShutdownHandler {
     }
     _shuttingDown = true;
     _log('Received $signal, shutting down.');
+
+    var code = 0;
     try {
       // Drain first, then release. Closing the auth layer and the app up
       // front shut the OIDC and googleapis http clients out from under the
@@ -73,7 +83,25 @@ class ShutdownHandler {
       // resolving its credential got `Client is already closed` instead of
       // finishing.
       await _drain();
-      _release();
+    } catch (e) {
+      // Exiting is the point; a failure on the way out must not become an
+      // unhandled async error that leaves the process up. Reporting success
+      // is not the way to achieve that, though, which is what this used to
+      // do: the drain that never finished ended in `_exit(0)`, and the
+      // supervisor was told the grace period had run its course.
+      _log('Error during shutdown: the drain failed: $e');
+      code = _failedExitCode;
+    } finally {
+      // Whether or not the drain got through. A throw out of `drain()` used
+      // to skip everything below it: Mongo left open, the timer and the http
+      // clients still held, and the signal handlers still installed on a
+      // process that had just announced it was leaving.
+      //
+      // One `try` per step, for the reason `UserValidator.sweep` keeps one
+      // per purge: these are independent cleanups, and the first one to fail
+      // must not be what stops the rest from running.
+      var released =
+          await _step('releasing what the process holds open', _release);
 
       // Everything past this line runs with the signal handlers uninstalled,
       // because closing the database is the one step this isolate cannot be
@@ -89,22 +117,53 @@ class ShutdownHandler {
       // which the operating system applies without the Dart event loop having
       // to turn again — so the next signal ends the process instead of
       // needing SIGKILL.
-      await _releaseSignals();
+      var handedBack = await _step('handing the signals back', _releaseSignals);
 
       // The timeout still earns its place for the half of the close that is
       // genuinely asynchronous: it ends in `await socket.close()`, which
       // stalls for as long as a peer that has stopped reading keeps the
       // connection half-open.
-      await _closeDatabase().timeout(_databaseTimeout, onTimeout: () {
-        _log('Database did not close within $_databaseTimeout; '
-            'exiting anyway.');
-      });
-    } catch (e) {
-      // Exiting is the point; a failure on the way out must not become an
-      // unhandled async error that leaves the process up.
-      _log('Error during shutdown: $e');
+      var closedInTime = true;
+      var closed = await _step(
+          'closing the database',
+          () => _closeDatabase().timeout(_databaseTimeout, onTimeout: () {
+                // Abandoned, not tolerated. `onTimeout` returning normally
+                // makes the step look like it succeeded, but the socket is
+                // still open and the cleanup was given up on — which is a
+                // step that did not finish, and exactly what
+                // [_failedExitCode] promises an operator can tell apart. The
+                // log line is what says *which* step; the code is what makes
+                // anything notice.
+                //
+                // So a stop where the database socket would not close leaves
+                // the unit `failed` in `systemctl status` rather than
+                // `inactive (dead)`. That is deliberate: it is the only trace
+                // an operator gets that the process left a connection behind,
+                // and a shutdown that routinely trips it is a deployment
+                // worth looking at, not a message worth suppressing. Raise
+                // `databaseTimeout` if a slow peer makes it noise.
+                _log('Database did not close within $_databaseTimeout; '
+                    'exiting anyway.');
+                closedInTime = false;
+              }));
+
+      if (!released || !handedBack || !closed || !closedInTime) {
+        code = _failedExitCode;
+      }
     }
-    _exit(0);
+    _exit(code);
+  }
+
+  /// Runs one step of the shutdown, saying whether it got through rather than
+  /// letting it end the rest. See [_shutDown].
+  Future<bool> _step(String what, FutureOr<void> Function() work) async {
+    try {
+      await work();
+      return true;
+    } catch (e) {
+      _log('Error during shutdown: $what failed: $e');
+      return false;
+    }
   }
 
   Future<void> _releaseSignals() async {

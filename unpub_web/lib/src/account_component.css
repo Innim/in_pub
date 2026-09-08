@@ -37,11 +37,6 @@
   max-width: 70ch;
 }
 
-.error {
-  color: #c62828;
-  font-weight: 500;
-}
-
 .current {
   font-weight: 600;
   color: #0175c2;

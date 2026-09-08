@@ -74,6 +74,20 @@ RouteKind classifyRoute(String path, {bool publicBadges = true}) {
 
   if (path.startsWith('/webapi/')) return RouteKind.webApi;
 
+  // Generated API documentation. It is a read of a package's contents, like
+  // a tarball, and it is fetched both ways: the web UI links straight to it
+  // from the package page, while a docs mirror or a CI job holding a token
+  // has no cookie to present. `pubApi` is the kind that takes either — a
+  // bearer token, or a session cookie for a read — so as `web` a token
+  // holder had no way to authenticate for it at all, which is the hole
+  // closed badges had.
+  //
+  // It does not inherit the rest of that kind's "open unless
+  // `--auth-protect-pub-api`" rule, though: see the gate, which demands a
+  // credential for this prefix either way. What is generated from a private
+  // package's source is as private as the package.
+  if (isDocumentation(path)) return RouteKind.pubApi;
+
   // The pub client's own surface: metadata, uploads, and the tarballs
   // themselves.
   if (path.startsWith('/api/')) return RouteKind.pubApi;
@@ -99,6 +113,17 @@ bool _isBadge(String path) => path.startsWith('/badge/');
 /// prefix in one of them would have gone on serving closed badges to anyone.
 bool isClosedBadge(String path, {required bool publicBadges}) =>
     !publicBadges && _isBadge(path);
+
+/// Whether [path] serves generated API documentation.
+///
+/// One prefix with three readers: [classifyRoute] sends it to the contract
+/// that accepts a bearer token, the gate demands a credential for it even
+/// where `--auth-protect-pub-api` leaves the rest of the pub surface open,
+/// and the cache marking lets a browser keep what it fetched. Spelled out
+/// three times they could come to disagree, and the disagreement that
+/// matters here is the one that serves a private package's documentation to
+/// anybody who asks.
+bool isDocumentation(String path) => path.startsWith('/documentation/');
 
 /// Gates every request on a valid session once `--auth` is on.
 class AuthMiddleware {
@@ -135,9 +160,20 @@ class AuthMiddleware {
             // Without this, `--no-auth-public-badges` on its own was a
             // silent no-op serving badges to anyone — the opposite of what
             // the operator asked for.
+            //
+            // Documentation is here for the same reason, without a flag of
+            // its own: it is classified `pubApi` so that a token can open
+            // it, but it has never been reachable without signing in and
+            // `--auth-protect-pub-api` is off by default — inheriting that
+            // rule would have published every private package's generated
+            // API reference to anyone who asked, on the default
+            // configuration, as the side effect of making it reachable with
+            // a token. It follows the web UI it is linked from: gated
+            // whenever `--auth` is on.
             return _pubApi(req, inner,
                 alwaysGate:
-                    isClosedBadge(path, publicBadges: config.publicBadges));
+                    isClosedBadge(path, publicBadges: config.publicBadges) ||
+                        isDocumentation(path));
           }
 
           var result = await sessions.resolve(req);
@@ -175,13 +211,21 @@ class AuthMiddleware {
       {bool alwaysGate = false}) async {
     if (!config.protectPubApi && !alwaysGate) return inner(req);
 
-    var header = req.headers[HttpHeaders.authorizationHeader];
-    if (header == null || !header.toLowerCase().startsWith('bearer ')) {
+    // Whether an answer on this path may sit in the caller's own browser
+    // cache. Read here rather than only on the session branch of the outer
+    // middleware, which documentation no longer takes: both ways in end up
+    // marking the answer, and a doc set left `no-store` is the whole bundle
+    // re-downloaded on every click through it.
+    var storable = _mayBeHeldByTheBrowser(req.requestedUri.path);
+
+    var token = bearerTokenOf(req);
+    if (token == null) {
       if (!_isPublishFlow(req)) {
         var session = await sessions.resolve(req);
         if (session.isAuthenticated) {
           var response = await inner(req);
-          return withCookies(_private(response), session.cookies);
+          return withCookies(
+              _private(response, storable: storable), session.cookies);
         }
         // A person clicking the archive link on a package page is owed the
         // sign-in flow, not the pub client's JSON. Whatever the session
@@ -199,7 +243,7 @@ class AuthMiddleware {
     }
 
     var result = await resolveBearer(
-      header.substring('bearer '.length).trim(),
+      token,
       ip: clientIp(req, config.trustedProxies),
       // The original Google credential proves only that somebody holds a
       // Google account: it carries no group, and until they have signed in
@@ -222,21 +266,24 @@ class AuthMiddleware {
       return _pubUnauthorized(result.message ?? 'This credential was refused.');
     }
 
-    return _private(await inner(req.change(context: {
-      bearerPrincipalContextKey: user,
-      bearerProvisionalContextKey: result.provisional,
-    })));
+    return _private(
+        await inner(req.change(context: {
+          bearerPrincipalContextKey: user,
+          bearerProvisionalContextKey: result.provisional,
+        })),
+        storable: storable);
   }
 
   /// Whether a path answers with something particular to this repository's
   /// contents, as opposed to the application shell, which is the same for
   /// everyone and wants to be cached.
-  /// Badges are deliberately absent: `classifyRoute` sends them to `public`
-  /// or, once closed, to `pubApi`, and this is only consulted on the
-  /// session-authenticated branch — which serves neither. A closed badge is
-  /// marked private by `_pubApi` instead.
-  static bool _carriesPackageData(String path) =>
-      path.startsWith('/webapi/') || path.startsWith('/documentation/');
+  /// Badges and documentation are deliberately absent: `classifyRoute` sends
+  /// a badge to `public` or, once closed, to `pubApi`, and documentation to
+  /// `pubApi` outright — while this is only consulted on the
+  /// session-authenticated branch, which serves none of them. Both are
+  /// marked private by `_pubApi` instead. That leaves the web UI's own data
+  /// endpoints, which is everything that reaches here carrying a package.
+  static bool _carriesPackageData(String path) => path.startsWith('/webapi/');
 
   /// Whether a path's answer may sit in the caller's own browser cache.
   ///
@@ -245,8 +292,12 @@ class AuthMiddleware {
   /// makes the browser re-fetch all of it on every click, and buys nothing:
   /// what the marking is for is keeping a *shared* cache from serving one
   /// caller's answer to another, which `private` already does.
-  static bool _mayBeHeldByTheBrowser(String path) =>
-      path.startsWith('/documentation/');
+  ///
+  /// Consulted from `_pubApi` since documentation moved there, and on both
+  /// of its ways in: a browser reading the docs it was linked to presents a
+  /// cookie, a docs mirror presents a token, and the fetch is as repetitive
+  /// either way.
+  static bool _mayBeHeldByTheBrowser(String path) => isDocumentation(path);
 
   /// Marks an answer as belonging to one caller.
   ///
@@ -333,10 +384,14 @@ class AuthMiddleware {
   }
 
   /// The pub client's 401, with the instructions that get somebody unstuck.
+  ///
+  /// The instructions themselves are `pubUnauthorizedMessage`'s, not this
+  /// file's: `App` refuses the same publish whenever
+  /// `--auth-protect-pub-api` is off and the gate steps aside for
+  /// `/api/**`, and a publisher must not read a different sentence
+  /// depending on which layer answered.
   shelf.Response _pubUnauthorized(String message) =>
-      pubUnauthorized('$message Create a token at '
-          '${config.resolvePath('auth/tokens')} and run: '
-          'dart pub token add ${config.publicUrl}');
+      pubUnauthorized(message, auth: config);
 
   shelf.Response _refuse(
       shelf.Request req, RouteKind kind, SessionResult result) {

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:collection/collection.dart' show IterableExtension;
 import 'package:crypto/crypto.dart' show sha1;
+import 'package:meta/meta.dart';
 import 'package:shelf/shelf.dart' as shelf;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:mime/mime.dart';
@@ -11,8 +12,10 @@ import 'package:shelf_cors_headers/shelf_cors_headers.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:pub_semver/pub_semver.dart' as semver;
 import 'package:archive/archive.dart';
+import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/models.dart';
 import 'package:in_pub/unpub_api/lib/models.dart';
+import 'package:in_pub/unpub_api/lib/spa_routes.dart';
 import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
 import 'package:in_pub/src/doc_store.dart';
@@ -20,7 +23,6 @@ import 'package:in_pub/src/doc_progress_page.dart';
 import 'package:in_pub/src/auth/auth_middleware.dart';
 import 'package:in_pub/src/auth/http_helpers.dart';
 import 'package:in_pub/src/auth/identity.dart';
-import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/auth_service.dart';
 import 'package:in_pub/src/auth/google_credential.dart';
 import 'package:path/path.dart' as p;
@@ -33,10 +35,11 @@ part 'app.g.dart';
 
 /// Client-side routes that only mean anything once `--auth` is on.
 ///
-/// Named so the test that walks the shell routes reads the same list the
-/// server does; the `@Route.get` annotations on [App.indexHtml] still have
-/// to be kept in step by hand, because they are compiled into the router.
-const authOnlyRoutes = {'/account', '/admin'};
+/// The same set the web UI is built from: [SpaRoutePaths] is the single
+/// declaration, in the package both this server and `unpub_web` depend on,
+/// and the `@Route.get` annotations on [App.indexHtml] name its constants
+/// too. Nothing here is kept in step by hand any more.
+const authOnlyRoutes = SpaRoutePaths.authOnly;
 
 class App {
   static const proxyOriginHeader = "proxy-origin";
@@ -115,20 +118,8 @@ class App {
   static shelf.Response _okWithJson(Map<String, dynamic> data) =>
       shelf.Response.ok(
         json.encode(data),
-        headers: {HttpHeaders.contentTypeHeader: _jsonContentType},
+        headers: {HttpHeaders.contentTypeHeader: jsonContentType},
       );
-
-  /// `application/json` with the encoding spelled out.
-  ///
-  /// `ContentType.json.mimeType` drops the charset that `ContentType.json`
-  /// itself carries. Nothing was broken by that — shelf puts it back when
-  /// the body is a string, which every answer here is — but the guarantee
-  /// then lives in shelf rather than in this file, and a body handed over as
-  /// bytes would silently lose it. What is at stake is not decoration:
-  /// `package:http`, which the web UI fetches with, reads a body with no
-  /// stated charset as latin1, and every README and description this server
-  /// answers with is text somebody wrote.
-  static const _jsonContentType = 'application/json; charset=utf-8';
 
   static shelf.Response _successMessage(String message) => _okWithJson({
         'success': {'message': message}
@@ -138,16 +129,23 @@ class App {
           {int status = HttpStatus.badRequest}) =>
       shelf.Response(
         status,
-        headers: {HttpHeaders.contentTypeHeader: _jsonContentType},
+        headers: {HttpHeaders.contentTypeHeader: jsonContentType},
         body: json.encode({
           'error': {'message': message}
         }),
       );
 
   /// 401 for the pub client. Shared with the gate, so a caller sees the same
-  /// shape whichever of the two refused it.
-  static shelf.Response _unauthorized(String message) =>
-      pubUnauthorized(message);
+  /// shape — and the same instructions — whichever of the two refused it.
+  ///
+  /// Which one that is turns on a flag the publisher cannot see: with
+  /// `--auth-protect-pub-api` off, which is the default, the gate steps
+  /// aside for `/api/**` and every publish refusal is this one. Passing the
+  /// configuration along is what puts the token page and the
+  /// `dart pub token add` line in front of them here too; with `--auth` off
+  /// there is neither, [auth] is null, and the message stays bare.
+  shelf.Response _unauthorized(String message) =>
+      pubUnauthorized(message, auth: auth?.config);
 
   String _resolveUrl(shelf.Request req, String reference) {
     if (proxy_origin != null) {
@@ -230,10 +228,21 @@ class App {
       );
     }
 
-    var authHeader = req.headers[HttpHeaders.authorizationHeader];
-    if (authHeader == null) throw AuthException('missing authorization header');
-
-    var token = authHeader.split(' ').last;
+    // The scheme, not the last word on the line, and by the same parser the
+    // gate uses. `Authorization: Basic <base64 of user:pass>` had its base64
+    // taken for a token and passed to the resolvers below, which miss on this
+    // server's own tokens and fall through to Google's `tokeninfo`. A reverse
+    // proxy adding Basic auth in front of a private repository is an ordinary
+    // deployment, so that sent somebody's password to a third party. The gate
+    // has always parsed strictly, but it steps aside for `/api/**` unless
+    // `--auth-protect-pub-api` is on, which leaves this the parser on the
+    // default path.
+    var token = bearerTokenOf(req);
+    if (token == null) {
+      throw AuthException(req.headers[HttpHeaders.authorizationHeader] == null
+          ? 'missing authorization header'
+          : 'authorization header must use the bearer scheme');
+    }
 
     var authService = auth;
     if (authService != null) {
@@ -308,17 +317,32 @@ class App {
   /// Merged rather than set: the gate lists `Authorization` and sometimes
   /// `Cookie` as well, and overwriting that would tell a shared cache it may
   /// serve one token holder's private metadata to the next.
-  static shelf.Handler _varyOnOrigin(shelf.Handler inner) =>
+  ///
+  /// This runs on every answer the server gives — every static asset, every
+  /// 304, every metadata read — so it is written to allocate nothing in the
+  /// two cases that are almost all of them: no `Vary` at all, and one that
+  /// cannot possibly name `Origin`. The splitting is kept for the case where
+  /// it is needed, since `X-Origin-Id` contains "origin" without listing it
+  /// and the emitted header has to stay exactly what it was.
+  ///
+  /// Visible for testing because that exactness is the whole point of it: it
+  /// is reachable through the pipeline only for the `Vary` values this
+  /// server's own handlers happen to produce.
+  @visibleForTesting
+  static shelf.Handler varyOnOrigin(shelf.Handler inner) =>
       (shelf.Request req) async {
         var response = await inner(req);
         var stated = response.headers[HttpHeaders.varyHeader];
-        var fields =
-            (stated ?? '').split(',').map((f) => f.trim().toLowerCase());
-        if (fields.any((f) => f == 'origin' || f == '*')) return response;
-        return response.change(headers: {
-          HttpHeaders.varyHeader:
-              stated == null || stated.isEmpty ? 'Origin' : '$stated, Origin',
-        });
+        if (stated == null || stated.isEmpty) {
+          return response.change(headers: {HttpHeaders.varyHeader: 'Origin'});
+        }
+        var lower = stated.toLowerCase();
+        if (lower.contains('origin') || lower.contains('*')) {
+          var fields = lower.split(',').map((f) => f.trim());
+          if (fields.any((f) => f == 'origin' || f == '*')) return response;
+        }
+        return response
+            .change(headers: {HttpHeaders.varyHeader: '$stated, Origin'});
       };
 
   Future<HttpServer> serve([String host = '0.0.0.0', int port = 4000]) async {
@@ -347,7 +371,7 @@ class App {
     // them. A CDN or reverse proxy keying on the url alone then holds one
     // origin's header and replays it to the next caller. The wildcard branch
     // below needs none of this: `*` is the same answer for everybody.
-    if (authService != null) pipeline = pipeline.addMiddleware(_varyOnOrigin);
+    if (authService != null) pipeline = pipeline.addMiddleware(varyOnOrigin);
     pipeline = pipeline
         .addMiddleware(authService == null
             // A wildcard, not the caller's origin reflected back. The
@@ -891,9 +915,31 @@ class App {
 
   @Route.post('/api/packages/<name>/uploaders')
   Future<shelf.Response> addUploader(shelf.Request req, String name) async {
-    var body = await req.readAsString();
-    // Not `!`: a request without the field is a bad request, not a crash.
-    var email = Uri.splitQueryString(body)['email']?.trim() ?? '';
+    // Who is asking, before the body is so much as read. The gate steps
+    // aside for `/api/**` unless `--auth-protect-pub-api` is on, which is
+    // the default, so everything below this point used to run for whoever
+    // could open a socket: an unbounded read, and a `splitQueryString` that
+    // throws `ArgumentError` on a malformed escape — `email=%zz` was an
+    // unauthenticated 500 — followed by a 400 quoting the caller's own
+    // string back at them.
+    final String operatorEmail;
+    try {
+      operatorEmail = await _getUploaderEmail(req);
+    } on AuthException catch (e) {
+      return _unauthorized(e.message);
+    }
+    final String email;
+    try {
+      var body = await req.readAsString();
+      // Not `!`: a request without the field is a bad request, not a crash.
+      email = Uri.splitQueryString(body)['email']?.trim() ?? '';
+    } on ArgumentError {
+      // What `Uri.splitQueryString` raises on a percent-escape it cannot
+      // decode. Answered rather than allowed to escape: a body somebody
+      // typed wrong is a bad request, and letting it out of the handler
+      // reported it as this server having broken.
+      return _badRequest('malformed request body');
+    }
     if (email.isEmpty) {
       return _badRequest('email is required');
     }
@@ -909,12 +955,6 @@ class App {
           'recorded as the address it publishes under, so it has to be a '
           'full one — an @ and a domain with a dot in it. A single-label '
           'name like "ops@intranet" is refused for that reason');
-    }
-    final String operatorEmail;
-    try {
-      operatorEmail = await _getUploaderEmail(req);
-    } on AuthException catch (e) {
-      return _unauthorized(e.message);
     }
     var package = await metaStore.queryPackage(name);
     if (package == null) {
@@ -938,22 +978,24 @@ class App {
   @Route.delete('/api/packages/<name>/uploaders/<email>')
   Future<shelf.Response> removeUploader(
       shelf.Request req, String name, String email) async {
-    try {
-      email = Uri.decodeComponent(email);
-    } on FormatException {
-      // Defensive rather than a fix for anything reachable today: every
-      // malformed escape tried here is rejected by `Uri.parse` inside
-      // shelf's own `Request`, so nothing gets this far. Kept because the
-      // decode happens before any credential is checked, `removeVersion`
-      // has always guarded its identical one, and a lenient parser in some
-      // later shelf would make this an unauthenticated 500.
-      return _badRequest('malformed uploader address');
-    }
     final String operatorEmail;
     try {
       operatorEmail = await _getUploaderEmail(req);
     } on AuthException catch (e) {
       return _unauthorized(e.message);
+    }
+    try {
+      email = Uri.decodeComponent(email);
+    } on FormatException {
+      // Defensive rather than a fix for anything reachable today: every
+      // malformed escape tried here is rejected by `Uri.parse` inside
+      // shelf's own `Request`, so nothing gets this far. Kept because
+      // `removeVersion` has always guarded its identical one, and a lenient
+      // parser in some later shelf would otherwise make this a 500. Below
+      // the credential check, like the ones on `addUploader`: what the
+      // caller sent is not this server's business until it knows who they
+      // are.
+      return _badRequest('malformed uploader address');
     }
     var package = await metaStore.queryPackage(name);
     if (package == null) {
@@ -975,6 +1017,19 @@ class App {
     if (stored.isEmpty) {
       return _badRequest('email not uploader');
     }
+    // Refused rather than repaired. Taking every spelling means the last two
+    // entries can be one person — `Alice@Example.org` and
+    // `alice@example.org`, the pair the old literal-compare write path
+    // produced, so the oldest packages are the likeliest to hold it — and
+    // emptying the list locks the package: `_isUploader` then answers no to
+    // everybody, so nobody can publish to it, delete from it, or add an
+    // uploader back, and only an edit to the Mongo document undoes that.
+    if (stored.length == package.uploaders!.length) {
+      return _badRequest('a package must keep at least one uploader: '
+          'removing this one would leave nobody able to publish to '
+          '"$name", and there is no way to add an uploader back to a '
+          'package that has none');
+    }
 
     for (var entry in stored) {
       await metaStore.removeUploader(name, entry);
@@ -985,18 +1040,21 @@ class App {
   @Route.delete('/api/packages/<name>/versions/<version>')
   Future<shelf.Response> removeVersion(
       shelf.Request req, String name, String version) async {
-    try {
-      version = Uri.decodeComponent(version);
-    } catch (err) {
-      print(err);
-    }
-
     final String operatorEmail;
     try {
       operatorEmail = await _getUploaderEmail(req);
     } on AuthException catch (e) {
       return _unauthorized(e.message);
     }
+    // Below the credential check, like the decode on `removeUploader`.
+    // Nothing was leaking here — the catch swallows and answers nothing —
+    // but the three state-changing routes now read the same way round.
+    try {
+      version = Uri.decodeComponent(version);
+    } catch (err) {
+      print(err);
+    }
+
     var package = await metaStore.queryPackage(name);
 
     if (package == null) {
@@ -1306,14 +1364,21 @@ class App {
   /// a pasted link, a reload, a redirect from elsewhere on the server — hits
   /// the router instead of the application and comes back "not found". The
   /// list is deliberately explicit rather than a catch-all, so a genuinely
-  /// wrong url still says so; the price is that it has to be kept in step
-  /// with `unpub_web/lib/src/routes.dart`.
-  @Route.get('/')
-  @Route.get('/packages')
-  @Route.get('/packages/<name>')
-  @Route.get('/packages/<name>/versions/<version>')
-  @Route.get('/account')
-  @Route.get('/admin')
+  /// wrong url still says so.
+  ///
+  /// An annotation is read by a code generator, so its argument has to be a
+  /// compile-time constant and cannot be a loop over a list. Naming the
+  /// constants of [SpaRoutePaths] gets the same effect: the strings the
+  /// generator writes into `app.g.dart` are the ones the web UI is built
+  /// from, and `spa_routes_test.dart` fails if an entry here and the shared
+  /// list stop agreeing. The order matches `SpaRoutePaths.all`, which is the
+  /// client-side router's; this one anchors each pattern and does not care.
+  @Route.get(SpaRoutePaths.home)
+  @Route.get(SpaRoutePaths.account)
+  @Route.get(SpaRoutePaths.admin)
+  @Route.get(SpaRoutePaths.list)
+  @Route.get(SpaRoutePaths.detailVersion)
+  @Route.get(SpaRoutePaths.detail)
   Future<shelf.Response> indexHtml(shelf.Request req) async {
     // The account and administration screens exist only when there is
     // something to account for. Serving them otherwise gives a page whose

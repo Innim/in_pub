@@ -29,11 +29,12 @@ void main() {
 
     ShutdownHandler handlerWith({
       Future<void> Function()? drain,
+      void Function()? release,
       Future<void> Function()? closeDatabase,
     }) {
       final handler = ShutdownHandler(
         drain: drain ?? () async => steps.add('drain'),
-        release: () => steps.add('release'),
+        release: release ?? () => steps.add('release'),
         closeDatabase: closeDatabase ?? () async => steps.add('close'),
         databaseTimeout: const Duration(milliseconds: 50),
         signals: [signals.stream],
@@ -55,6 +56,18 @@ void main() {
 
       signals.add(ProcessSignal.sigterm);
 
+      // Non-zero: the close was abandoned with the socket still open, which
+      // is a step that did not finish however tidily the rest went. Exit 0
+      // would tell the supervisor a shutdown had completed that had not.
+      expect(await exited.future.timeout(const Duration(seconds: 5)), 1);
+      expect(steps, ['drain', 'release', 'close']);
+    });
+
+    test('a shutdown where every step finishes exits 0', () async {
+      handlerWith();
+
+      signals.add(ProcessSignal.sigterm);
+
       expect(await exited.future.timeout(const Duration(seconds: 5)), 0);
       expect(steps, ['drain', 'release', 'close']);
     });
@@ -73,6 +86,40 @@ void main() {
 
       await exited.future.timeout(const Duration(seconds: 5));
       expect(listeningDuringClose, isFalse);
+    });
+
+    test('a drain that fails still releases, and does not report success',
+        () async {
+      // The catch used to end in `_exit(0)`, and the throw skipped every step
+      // after the drain: Mongo left open, the timer and http clients still
+      // held, the signal handlers still installed — and systemd or Kubernetes
+      // told the shutdown had gone cleanly.
+      handlerWith(drain: () async {
+        steps.add('drain');
+        throw StateError('the server would not let go');
+      });
+
+      signals.add(ProcessSignal.sigterm);
+
+      expect(await exited.future.timeout(const Duration(seconds: 5)), 1,
+          reason: 'plain 1, so an operator can tell a failed shutdown from a '
+              'crash (255) and from a kill (128 + the signal)');
+      expect(steps, ['drain', 'release', 'close']);
+      expect(signals.hasListener, isFalse);
+    });
+
+    test('one release step failing does not skip the others', () async {
+      handlerWith(release: () {
+        steps.add('release');
+        throw StateError('a client was already closed');
+      });
+
+      signals.add(ProcessSignal.sigterm);
+
+      expect(await exited.future.timeout(const Duration(seconds: 5)), 1);
+      expect(steps, ['drain', 'release', 'close'],
+          reason: 'the database still has to be closed after a release that '
+              'threw');
     });
 
     test('a second signal ends the process instead of being swallowed',

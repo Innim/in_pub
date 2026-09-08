@@ -3,7 +3,26 @@ import 'dart:io';
 
 import 'package:shelf/shelf.dart' as shelf;
 
+import 'auth_config.dart';
 import 'crypto_box.dart';
+
+/// `application/json` with the encoding spelled out.
+///
+/// `ContentType.json.mimeType` drops the charset that `ContentType.json`
+/// itself carries. Nothing was broken by that — shelf puts it back when the
+/// body is a string, which every answer here is — but the guarantee then
+/// lives in shelf rather than in this package, and a body handed over as
+/// bytes would silently lose it. What is at stake is not decoration:
+/// `package:http`, which the web UI fetches with, reads a body with no
+/// stated charset as latin1, and every README and description this server
+/// answers with is text somebody wrote.
+///
+/// Here rather than beside the first answer that needed it, because the auth
+/// routes and the package API both answer JSON and neither can see a private
+/// constant on the other. It was written out by hand in four places before
+/// this, under a comment on one of them arguing that it must live in exactly
+/// one.
+const jsonContentType = 'application/json; charset=utf-8';
 
 /// Parses a `Cookie` request header. Shelf leaves cookies alone, so this is
 /// the only place that knows their wire format.
@@ -62,6 +81,25 @@ shelf.Response withCookies(shelf.Response response, List<String> cookies) {
   return response.change(headers: {
     HttpHeaders.setCookieHeader: [...existing, ...cookies],
   });
+}
+
+/// The bearer token on a request, or null when there is none.
+///
+/// Null covers both "no `Authorization` header" and "a header carrying some
+/// other scheme", because neither yields a token this server can resolve.
+/// Splitting on whitespace and taking the last word did yield one: an
+/// `Authorization: Basic dXNlcjpwYXNz` from a reverse proxy handed the
+/// base64 of somebody's `user:pass` to the credential resolvers, which try
+/// this server's own tokens, miss, and fall through to Google's `tokeninfo`
+/// endpoint — a password out of the building to a third party. Shared
+/// between the gate and the publish path so that the strict parse cannot
+/// hold on one and not the other.
+String? bearerTokenOf(shelf.Request req) {
+  var header = req.headers[HttpHeaders.authorizationHeader];
+  if (header == null || !header.toLowerCase().startsWith('bearer ')) {
+    return null;
+  }
+  return header.substring('bearer '.length).trim();
 }
 
 /// The address the request came from, as far as it can be trusted.
@@ -181,7 +219,7 @@ shelf.Response webRefusal(String message,
               if (denied) 'deniedDetail': signRefusalDetail(crypto, message),
             }),
             headers: {
-              HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
+              HttpHeaders.contentTypeHeader: jsonContentType,
               HttpHeaders.cacheControlHeader: 'no-store',
             }),
         cookies);
@@ -226,15 +264,41 @@ String returnTargetFor(shelf.Request req) =>
 /// stuck at the prompt. Built in one place because it is a contract with an
 /// external client: two copies would drift, and a caller would see a
 /// different shape depending on which refused it.
-shelf.Response pubUnauthorized(String message) => shelf.Response(
-      HttpStatus.unauthorized,
-      headers: {
-        HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
-        HttpHeaders.wwwAuthenticateHeader:
-            'Bearer realm="pub", message="${quoteHeaderValue(message)}"',
-        HttpHeaders.cacheControlHeader: 'no-store',
-      },
-      body: json.encode({
-        'error': {'message': message}
-      }),
-    );
+///
+/// [auth] is this server's configuration where the caller has one, so the
+/// refusal can say how to get a credential; see [pubUnauthorizedMessage].
+shelf.Response pubUnauthorized(String message, {AuthConfig? auth}) {
+  var full = pubUnauthorizedMessage(message, auth);
+  return shelf.Response(
+    HttpStatus.unauthorized,
+    headers: {
+      HttpHeaders.contentTypeHeader: jsonContentType,
+      HttpHeaders.wwwAuthenticateHeader:
+          'Bearer realm="pub", message="${quoteHeaderValue(full)}"',
+      HttpHeaders.cacheControlHeader: 'no-store',
+    },
+    body: json.encode({
+      'error': {'message': full}
+    }),
+  );
+}
+
+/// [message] followed by what to do about it, where there is anything to
+/// point at.
+///
+/// Two layers refuse the same publish. The gate does it while
+/// `--auth-protect-pub-api` is on; with it off — the default — the gate
+/// steps aside for `/api/**` and every refusal comes from the handler
+/// instead, which used to forward a bare "missing authorization header" and
+/// leave the publisher with nowhere to go. The wording lives here for the
+/// same reason [pubUnauthorized] does: two spellings of one instruction
+/// drift, and which of them a publisher sees would depend on a flag they
+/// cannot see.
+///
+/// With `--auth` off there is no token page to open and nothing to register
+/// with `dart pub token add`, so the bare message is the honest one.
+String pubUnauthorizedMessage(String message, AuthConfig? auth) {
+  if (auth == null || !auth.enabled) return message;
+  return '$message Create a token at ${auth.resolvePath('auth/tokens')} '
+      'and run: dart pub token add ${auth.publicUrl}';
+}

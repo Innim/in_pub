@@ -8,6 +8,7 @@ import 'package:shelf_router/shelf_router.dart';
 
 import 'package:in_pub/unpub_api/lib/models.dart';
 
+import '../address.dart';
 import 'auth_config.dart';
 import 'auth_pages.dart';
 import 'auth_store.dart';
@@ -63,6 +64,15 @@ class AuthRoutes {
     required this.crypto,
     this.isPackageUploader,
   });
+
+  /// Told when an administrator withdraws access from an account, so that
+  /// anything holding an answer about it can drop it.
+  ///
+  /// `AuthService` points this at its credential caches — the same hook
+  /// `UserValidator` is given, for the refusals it reaches on its own
+  /// schedule. Settable rather than constructed with, because it points back
+  /// at the object that builds this one.
+  void Function(String userId)? onAccessWithdrawn;
 
   /// Built once. A getter here compiled fourteen route patterns afresh on
   /// every request that reached `/auth/`.
@@ -393,9 +403,20 @@ class AuthRoutes {
     // already publishes as is the same collision, and nothing was looking
     // for it — `UserValidator` sees an existing account *change* address,
     // which a first sign-in is not.
+    //
+    // Deliberately not awaited, as the startup migration is not: it asks the
+    // store a question, and what it produces is a line in the log. Awaiting
+    // it put a round trip to the database in front of the redirect that
+    // completes a sign-in, on every first sign-in and every address change,
+    // to tell an administrator something no user is waiting to hear. The
+    // call swallows and logs its own failures, and `catchError` covers what
+    // could still escape it — nothing awaits this, so an error would have
+    // nowhere to go but the root zone, which kills the isolate.
     if (known == null ||
         normalizeAddress(known.email) != normalizeAddress(identity.email)) {
-      await warnOnServiceTokenClash(store, identity.email, identity.id);
+      unawaited(warnOnServiceTokenClash(store, identity.email, identity.id)
+          .catchError((Object e) =>
+              _log.warning('the service-token clash check failed: $e')));
     }
 
     // Either the provider is vouching for them again after a revocation, or
@@ -498,7 +519,6 @@ class AuthRoutes {
   Future<shelf.Response> _accountViewOf(SessionResult result) async {
     var user = result.user!;
     var isAdmin = config.isAdmin(user.groups);
-    var now = DateTime.now();
 
     // Overlapped through a record's `wait`, which keeps the element types
     // and, unlike awaiting them one at a time, has a listener on each from
@@ -509,7 +529,7 @@ class AuthRoutes {
     List<StoredToken> serviceRows;
     try {
       (sessionRows, tokenRows, serviceRows) = await (
-        store.listUserSessions(user.id),
+        store.listUserSessions(user.id, config.sessionIdle),
         store.listTokensOfUser(user.id),
         isAdmin ? _serviceTokensOrNone() : Future.value(const <StoredToken>[]),
       ).wait;
@@ -526,21 +546,14 @@ class AuthRoutes {
           cookies: result.cookies);
     }
 
-    // Only the sessions are filtered here, and only for the idle window: the
-    // store's query drops revoked and expired rows itself, but it cannot
-    // express "unused for longer than `--auth-session-idle`", which is
-    // configuration this layer holds. Showing one of those as live would put
-    // an "End" button on a session that is already gone.
-    //
-    // The token listings get nothing. Both stores enforce liveness in the
-    // query and both say so in a comment warning that a caller filtering
-    // afterwards would pass in test and read history in production — so
-    // re-applying it here put the rule in a third place, where it can only
-    // ever drift from the two that decide it.
-    var sessions_ = sessionRows
-        .where((s) => !s.isRevoked && !s.isExpired(now, config.sessionIdle))
-        .map(_sessionView)
-        .toList();
+    // Nothing is filtered here. Every listing above enforces liveness in the
+    // query, the idle window included: it is configuration this layer holds,
+    // so it is handed to the store rather than applied to what comes back.
+    // Both stores say so in a comment warning that a caller filtering
+    // afterwards would pass in test and read history in production — and the
+    // sessions did exactly that, which put "is this session live" in a third
+    // place where it could only ever drift from the two that decide it.
+    var sessions_ = sessionRows.map(_sessionView).toList();
     var tokens_ = tokenRows.map(_tokenView).toList();
     var serviceTokens_ = serviceRows.map(_tokenView).toList();
     var view = AccountView(
@@ -653,7 +666,20 @@ class AuthRoutes {
     var days = _daysField(body, 'lifetimeDays', 90);
     var lifetime = days == 0 ? null : Duration(days: days);
 
-    late IssuedToken issued;
+    // Not `late`, and not assigned from inside a closure. This used to be a
+    // `late IssuedToken` that the service branch filled in from the callback
+    // handed to [_whileClaiming], which held together only because that
+    // helper either runs the closure or throws. Nothing said so to the
+    // compiler: a later change making it swallow an error from the request
+    // queued ahead — a perfectly reasonable robustness change, since somebody
+    // else's failure is not this request's problem — would have thrown
+    // `LateInitializationError` *after* `issueService` had written a live
+    // token row. The caller would get a 500, never see the one-time secret,
+    // and the account would be left holding a working credential nobody knows
+    // about; only its hash is stored, so the value could not be recovered.
+    // Both branches now assign it directly, and the address check refuses the
+    // way the writer already does.
+    IssuedToken issued;
     try {
       if (_stringField(body, 'kind') == 'service') {
         if (!config.isAdmin(user.groups)) {
@@ -671,22 +697,24 @@ class AuthRoutes {
         // That address is what a publish is recorded as and what the package's
         // uploader list is checked against, so handing out somebody else's
         // would turn "may manage sessions" into "may publish as anyone".
-        var refusal = await _whileClaiming(email, () async {
+        //
+        // The claim has to cover the check and the write together, so both
+        // live in the closure — but the token it produces is returned from it
+        // rather than assigned through it, which is what lets `issued` be an
+        // ordinary local. A refusal leaves by the same door the writer's own
+        // refusals use, so the two arrive at one handler instead of two
+        // identical ones.
+        issued = await _whileClaiming(email, () async {
           var refusal = await _checkServiceAddress(email);
-          if (refusal != null) return refusal;
-          issued = await tokens.issueService(
+          if (refusal != null) throw TokenIssueRefused(refusal);
+          return await tokens.issueService(
             createdBy: user.id,
             name: name,
             email: email,
             displayName: name,
             lifetime: lifetime,
           );
-          return null;
         });
-        if (refusal != null) {
-          return _apiError(refusal,
-              status: HttpStatus.forbidden, cookies: guard.result!.cookies);
-        }
       } else {
         issued = await tokens.issuePersonal(
             owner: user, name: name, lifetime: lifetime);
@@ -695,7 +723,10 @@ class AuthRoutes {
       // The identity a token would carry is refused by the thing that writes
       // it, not only by the screen in front: a personal token copies its
       // address off the account, and nothing on this path had ever looked at
-      // it.
+      // it. `_checkServiceAddress` answers here too — the response is the
+      // same 403 carrying the same wording either way, and routing its
+      // refusal through the writer's exception is what keeps the token itself
+      // out of the closure that claims the address.
       _log.warning('refused a token for ${user.id}: ${e.message}');
       return _apiError(e.message,
           status: HttpStatus.forbidden, cookies: guard.result!.cookies);
@@ -714,11 +745,14 @@ class AuthRoutes {
   /// administrators acting at once each get a token for one identity, and
   /// revoking either leaves the other publishing as that person. A unique
   /// index would be the airtight answer, but it cannot be built on a
-  /// deployment that already holds duplicates — and the token's address is
-  /// not stored folded, so the index would not even enforce the rule this
-  /// check applies. One process owns this collection, so serialising the
-  /// pair here closes the window that actually exists; two servers sharing a
-  /// database still race, and that is written down as the residual risk.
+  /// deployment that already holds duplicates. The folded address is a
+  /// stored field now — `emailKey`, put there so the address lookup could be
+  /// answered from an index — so such a constraint would at last express the
+  /// rule this check applies; what stands in the way is the rows already
+  /// written, which is a migration and not this. One process owns this
+  /// collection, so serialising the pair here closes the window that
+  /// actually exists; two servers sharing a database still race, and that is
+  /// written down as the residual risk.
   final _addressClaims = <String, Future<void>>{};
 
   /// Runs [work] with nobody else claiming [email].
@@ -840,7 +874,29 @@ class AuthRoutes {
     // revocation into the log that nobody performed — the same shape as the
     // uploader routes that used to say "uploader added" over an update
     // matching no document.
-    if (!await store.revokeToken(target.id, 'revoked from the account page')) {
+    // Dropped from the resolution cache on both sides of the write, which is
+    // one map removal and closes two different failures.
+    //
+    // Before, for the write that never lands: a store fault here would
+    // otherwise leave this process serving the token from memory for the
+    // rest of the window, from a request whose whole purpose was to stop it.
+    //
+    // After, for the request that raced it: a bearer request already in
+    // flight when the drop above ran reads a row that is still live, is
+    // legitimately accepted, and would write a *fresh* acceptance behind us
+    // — so the token would go on working for a full window despite a
+    // revocation that has committed. `TokenService` refuses that write for a
+    // resolution that began before either drop; this second drop covers the
+    // one that finished in between.
+    //
+    // Both paths this handler serves are covered, the owner revoking their
+    // own and an administrator revoking a service token, because both arrive
+    // here.
+    tokens.forgetToken(target.id);
+    var revoked =
+        await store.revokeToken(target.id, 'revoked from the account page');
+    tokens.forgetToken(target.id);
+    if (!revoked) {
       return _apiError('That token has already been revoked.',
           status: HttpStatus.conflict, cookies: guard.result!.cookies);
     }
@@ -981,10 +1037,30 @@ class AuthRoutes {
     // One more than shown, so a full page can be told from a page that
     // happens to end exactly at the limit.
     const shown = 200;
-    var (counts, userRows) = await (
-      store.liveSessionCounts(config.sessionIdle),
-      store.listUsers(limit: shown + 1)
-    ).wait;
+    Map<String, int> counts;
+    List<StoredUser> userRows;
+    try {
+      (counts, userRows) = await (
+        store.liveSessionCounts(config.sessionIdle),
+        store.listUsers(limit: shown + 1)
+      ).wait;
+    } on ParallelWaitError catch (e) {
+      // The same handler `_accountViewOf` carries, and needed rather more
+      // here: `_adminAct` commits the block, the unblock or the end-sessions
+      // write and *then* asks for this view. A fault in either query after
+      // that point escaped as a bare 500 — and the web client only reads 401
+      // and 403 as refusals, so an administrator whose block had taken effect
+      // was told the server did not answer with JSON. The wording says the
+      // read failed and stops short of claiming anything about the action,
+      // which is the honest thing to say from a method that does not know
+      // whether there was one.
+      _log.severe('could not read the administration view for '
+          '${result.user!.id}: ${e.errors}');
+      return _apiError(
+          'The list of users could not be read just now. Please try again.',
+          status: HttpStatus.serviceUnavailable,
+          cookies: result.cookies);
+    }
     var truncated = userRows.length > shown;
     if (truncated) userRows = userRows.sublist(0, shown);
     var users = userRows
@@ -1022,7 +1098,8 @@ class AuthRoutes {
     if (targetId.isEmpty) {
       return _apiError('No user was named.', cookies: guard.result!.cookies);
     }
-    if (await store.getUser(targetId) == null) {
+    var target = await store.getUser(targetId);
+    if (target == null) {
       return _apiError('That user does not exist.',
           status: HttpStatus.notFound, cookies: guard.result!.cookies);
     }
@@ -1036,20 +1113,67 @@ class AuthRoutes {
 
     switch (action) {
       case 'end-sessions':
+        // No cache to drop, and deliberately so. This ends browser sessions;
+        // it withdraws nothing from the account, which stays active and
+        // whose tokens go on working — that is the documented difference
+        // between this action and a block. Sessions are not resolved through
+        // either credential cache in the first place.
         var ended = await store.revokeUserSessions(
             targetId, 'ended by an administrator');
         _log.info('${actor.id} ended $ended session(s) for $targetId');
       case 'block':
+        // Their tokens are not revoked by this — deliberately, so that
+        // unblocking restores them rather than costing everybody a reissue —
+        // so the only thing that stops one is the owner check the resolution
+        // cache is allowed to skip. Dropped first, and before the writes, so
+        // that a block whose second write fails has still stopped the
+        // credentials this process was holding an answer for.
+        //
+        // Through the hook rather than straight to `tokens`, because a
+        // blocked account can also be reached by the legacy Google
+        // credential, whose answers are remembered elsewhere. Blocking has
+        // to stop both.
+        onAccessWithdrawn?.call(targetId);
         await store.setUserStatus(targetId, UserStatus.blockedLocal,
             reason: 'Access to this package repository has been withdrawn by '
                 'an administrator.');
         var ended = await store.revokeUserSessions(
             targetId, 'blocked by an administrator');
+        // Again, now that the block is on the record. The call above is for
+        // a write that fails; this one is for a bearer request that was
+        // already resolving when it ran — that request read a live account,
+        // was rightly accepted, and would otherwise write a fresh acceptance
+        // behind the block. See `TokenService.resolve`, which also refuses
+        // the write for anything still in flight across both of these.
+        onAccessWithdrawn?.call(targetId);
         _log.info('${actor.id} blocked $targetId and ended $ended session(s)');
       case 'unblock':
+        if (target.status == UserStatus.needsSignIn) {
+          // `needsSignIn` is not a block, and unblocking it does not stick.
+          // The server has run out of ways to re-check the account — there
+          // is no refresh token left — so the forced revalidation below
+          // writes `needsSignIn` straight back on the very next request and
+          // ends the sessions a second time. The administrator would watch
+          // the status flip to active and flip back, and the account's owner
+          // would be signed out again for no reason they can see. Only they
+          // can clear this, by signing in. [AdminUser.status] tells clients
+          // not to offer the button; this is a public endpoint, so it has to
+          // be said here too.
+          return _apiError(
+              'That account is not blocked: it is waiting for its owner to '
+              'sign in again, which is the only thing that clears this. '
+              'Unblocking it would be undone by the next request it makes.',
+              cookies: guard.result!.cookies);
+        }
         // Back to active, but with no confirmation on record: the next
         // request makes them prove themselves against the provider before
         // anything is served.
+        //
+        // Nothing to drop from the caches: only acceptances are ever kept,
+        // so there is no stale refusal to clear, and an acceptance for an
+        // account that was blocked cannot exist — the block dropped it, and
+        // every resolution since has been refused. Restoring access is also
+        // the one direction where being late would be harmless.
         await store.setUserStatus(targetId, UserStatus.active);
         await store.recordValidation(targetId,
             validatedAt: DateTime.fromMillisecondsSinceEpoch(0), failures: 0);
@@ -1147,7 +1271,7 @@ shelf.Response _json(Map<String, dynamic> body,
         {int status = HttpStatus.ok, List<String> cookies = const []}) =>
     withCookies(
         shelf.Response(status, body: json.encode(body), headers: {
-          HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8',
+          HttpHeaders.contentTypeHeader: jsonContentType,
           HttpHeaders.cacheControlHeader: 'no-store',
         }),
         cookies);

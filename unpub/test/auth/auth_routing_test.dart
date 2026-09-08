@@ -22,7 +22,21 @@ void main() {
       expect(
           classifyRoute('/packages/my_package/versions/1.0.0'), RouteKind.web);
       expect(classifyRoute('/main.dart.js'), RouteKind.web);
-      expect(classifyRoute('/documentation/my_package/1.0.0/'), RouteKind.web);
+    });
+
+    test('generated documentation takes either credential', () {
+      // `pubApi` is the kind that accepts a bearer token, and a session
+      // cookie for a read besides. As `web` a docs mirror or a CI job
+      // holding a token had no way to authenticate for it at all, while the
+      // web UI links straight to it from the package page — so it has to
+      // keep working from a browser too.
+      expect(
+          classifyRoute('/documentation/my_package/1.0.0/'), RouteKind.pubApi);
+      expect(classifyRoute('/documentation/my_package/1.0.0/__status'),
+          RouteKind.pubApi);
+      // Unlike the rest of that kind it is not opened by
+      // `--auth-protect-pub-api` being off; the gate decides that, and
+      // `pub_api_gate_test.dart` holds it to it.
     });
 
     test('the web UI data endpoints are XHR routes', () {
@@ -77,6 +91,7 @@ void main() {
         '/packages/foo.json',
         '/logo',
         '/packages/foo',
+        '/documentation/foo/1.0.0/',
       ]) {
         expect(
             isClosedBadge(path, publicBadges: false),

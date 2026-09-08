@@ -1,3 +1,31 @@
+## 3.5.1
+
+### Added
+- `--auth-credential-cache`, how long an accepted bearer credential may be answered again from memory before the account behind it is read afresh. Defaults to `5s`; `0` turns it off. Checking a credential costs two database reads and one `dart pub get` over a workspace makes hundreds of gated requests. Refusals are never held, and revoking a token, blocking an account or any refusal the revalidator reaches drops what this server remembers at once, so those land on the very next request; the window bounds only what changes behind this process's back.
+
+### Changed
+- The single-page-application route list is declared once, in `unpub_api/spa_routes.dart`, and read by the server's router, its gate and the web application. It was four hand-synced copies, including the one in the test meant to guard it; a route added to one place and not the others now fails the suite instead of shipping a page that 404s.
+- The address helpers (`normalizeAddress`, `storedAddressPattern`, `looksLikeEmailAddress`) moved to `src/address.dart`, so the package layer no longer imports the auth store for string folding. They are still exported from `package:in_pub/in_pub.dart`.
+- Generated API documentation accepts a bearer token as well as a browser session, so a CI job or a docs mirror can read it. It stays gated whenever `--auth` is on, with or without `--auth-protect-pub-api`.
+- Three queries on the sign-in and sweep paths no longer scan their whole collection: the session sweep and the service-token address lookup are answered from indexes, and the clash warning a sign-in logs is no longer waited for. Token documents gain a folded `emailKey`, and `--auth-session-idle` is applied in one place instead of three.
+
+### Fixed
+- A malformed `--auth-public-url` is reported in the startup validation list with the other problems, instead of throwing a stack trace before that list can be printed.
+- A publish refused by the handler now carries the same `dart pub token add` instruction the gate's refusals do. On the default configuration the gate stands aside for `/api/`, so a publisher saw only the bare reason.
+- A group name with a space in it is no longer split into two: a `groups` claim sent as a delimited string is separated on commas alone, which is what the gateways that flatten one actually use.
+- Unblocking an account that is waiting for its owner to sign in is refused rather than accepted and undone by that account's next request. The web UI never offered it; the API did.
+- A shutdown that does not finish exits non-zero, and the release steps run whether the drain succeeded or not. A failed drain used to report a clean stop while leaving the database connection, the timers and the signal handlers behind.
+- A database fault while a request is being checked is answered in words instead of escaping as a bare 500: the browser gets the refusal its front end renders and `dart pub` gets the 401 it prints back, both asking for a retry, and the browser keeps its session cookie so a reload once the store recovers is all it takes. The administration screen no longer reports that a block failed when only the list of users could not be read afterwards.
+- A browser is no longer accused of holding a cloned cookie because two of its requests crossed the session-secret rotation boundary. A request that arrived on the previous secret re-issued a third one, pushing the secret already delivered to the browser out of both slots; it is now served on what it presented and nothing is written.
+- Removing the last uploader of a package is refused instead of committed: an empty uploader list left the package impossible to publish to, delete from or add an uploader back to, short of editing the database.
+- A credential check no longer blocks the account or ends its browser sessions: one `dart pub publish` from CI signed the owner out of every browser they had open, over evidence that can be a raced refresh token. The credential is still refused, and the block is left to the next sign-in or to the sweep. The administration screen calls that state "no longer authorised" rather than "revoked by provider", since a `--auth-allowed-groups` change made here reaches it too.
+- The uploader and publish routes authenticate before they read or validate anything the caller sent, and an `Authorization` header carrying a scheme other than `bearer` is refused rather than having its value handed to Google's `tokeninfo` — a proxy adding Basic auth in front of this server sent the password there.
+
+### Breaking
+- `AuthConfig` gains `credentialCache`, and `UserValidator` and `AuthRoutes` gain an `onAccessWithdrawn` callback the credential cache is wired to. Anyone constructing these directly is unaffected by the defaults; anyone wrapping them has to forward the callback or a withdrawal will not reach the cache.
+- `AuthStore.listUserSessions` now takes the idle window, so the account screen and the administration screen stop deriving "live session" from different rules. Anyone with their own `AuthStore` implementation has to drop sessions unused for longer than it.
+- `AuthStore.rotateSession` no longer takes `prevSecretHash`: the expected secret is the one that stays acceptable, and every other choice strands a cookie a client may still hold. Anyone with their own `AuthStore` implementation has to drop the parameter.
+
 ## 3.5.0
 
 ### Added
