@@ -1,4 +1,9 @@
+import 'dart:convert';
+
+import 'package:archive/archive.dart';
+import 'package:collection/collection.dart' show IterableExtension;
 import 'package:logging/logging.dart';
+import 'package:yaml/yaml.dart';
 
 /// Rewrites the repository urls that a *published* pubspec names, so that
 /// packages published under an earlier address of this repository resolve
@@ -107,10 +112,7 @@ class HostedUrlCompat {
   }) {
     if (!enabled) return pubspec;
 
-    final targets = _identitiesFor == canonical
-        ? _identities!
-        : (_identities = _legacyIdentities(canonical));
-    _identitiesFor = canonical;
+    final targets = _targetsFor(canonical);
     if (targets.isEmpty) return pubspec;
 
     final replacement = _identity(canonical);
@@ -137,6 +139,198 @@ class HostedUrlCompat {
     }
 
     return result ?? pubspec;
+  }
+
+  /// [archive] — a published `.tar.gz` — with the `pubspec.yaml` inside it
+  /// rewritten the same way [rewrite] rewrites the metadata. Null when
+  /// nothing in it names an old address, which is the answer for everything
+  /// published since the move.
+  ///
+  /// This exists because rewriting the metadata alone fixes exactly one
+  /// resolution. `dart pub` reads a hosted package's dependencies from the
+  /// version listing only while that package is not yet in the local cache;
+  /// once it has been extracted into
+  /// `$PUB_CACHE/hosted/<host>/<package>-<version>/`, every later solve reads
+  /// *that* directory's `pubspec.yaml` instead. So a `pub get` on a clean
+  /// cache succeeded and the very next one failed with the conflict again.
+  /// The copy the client keeps has to name the current address too.
+  ///
+  /// The stored archive is never touched — this transforms the bytes on their
+  /// way out — but it does change what the client receives, and therefore the
+  /// content hash it records in `pubspec.lock`. That is the price, and it is
+  /// paid once: pub reports the hash it had is out of date, updates it, and
+  /// is quiet from then on. The output is a deterministic function of the
+  /// input, so the hash does not move between requests or restarts.
+  List<int>? rewriteArchive(
+    List<int> archive, {
+    required Uri canonical,
+    String? package,
+    String? version,
+  }) {
+    if (!enabled || _targetsFor(canonical).isEmpty) return null;
+
+    final Archive decoded;
+    try {
+      decoded = TarDecoder().decodeBytes(GZipDecoder().decodeBytes(archive));
+    } catch (error) {
+      // Not this layer's business to reject an archive: whatever is stored is
+      // what was published, and a client that can read it should keep getting
+      // it. Served untouched, with a line saying why.
+      _log.warning('Could not read the archive of $package $version to '
+          'rewrite its pubspec; serving it unchanged. $error');
+      return null;
+    }
+
+    // `dart pub publish` puts the pubspec at the root. `./pubspec.yaml` is
+    // accepted too, since not every archive in a repository this old was
+    // necessarily written by the same tool.
+    final pubspecFile = decoded.files.firstWhereOrNull(
+        (f) => f.name == 'pubspec.yaml' || f.name == './pubspec.yaml');
+    if (pubspecFile == null) return null;
+
+    final String source;
+    try {
+      source = utf8.decode(pubspecFile.content as List<int>);
+    } on FormatException catch (error) {
+      _log.warning('The pubspec of $package $version is not valid UTF-8; '
+          'serving the archive unchanged. $error');
+      return null;
+    }
+
+    final rewritten = rewritePubspecYaml(source,
+        canonical: canonical, package: package, version: version);
+    if (rewritten == null) return null;
+
+    final bytes = utf8.encode(rewritten);
+    final result = Archive();
+    for (final file in decoded.files) {
+      if (!identical(file, pubspecFile)) {
+        result.addFile(file);
+        continue;
+      }
+      // Mode and timestamp carried over, so the only difference between the
+      // archive that was published and the one served is the url.
+      result.addFile(ArchiveFile(file.name, bytes.length, bytes)
+        ..mode = file.mode
+        ..lastModTime = file.lastModTime);
+    }
+    return _deterministicGzip(TarEncoder().encode(result));
+  }
+
+  /// [tar] gzipped with the timestamp left out of the header.
+  ///
+  /// `GZipEncoder` stamps `DateTime.now()` into the gzip MTIME field, so the
+  /// same archive encoded two seconds apart comes out with a different
+  /// SHA-256 — and pub records that hash in `pubspec.lock` and checks the
+  /// cached copy against it. Every clean-cache resolve would report the hash
+  /// as out of date and rewrite the lockfile, and `--enforce-lockfile` would
+  /// simply fail. Zero is what RFC 1952 reserves for "no timestamp", which is
+  /// what `gzip -n` writes and what every reader ignores.
+  static List<int>? _deterministicGzip(List<int> tar) {
+    final bytes = GZipEncoder().encode(tar);
+    if (bytes == null || bytes.length < 8) return bytes;
+    // Only on something that is actually gzip, so a future encoder change
+    // cannot have four unrelated bytes overwritten.
+    if (bytes[0] != 0x1f || bytes[1] != 0x8b) return bytes;
+    for (var i = 4; i < 8; i++) {
+      bytes[i] = 0;
+    }
+    return bytes;
+  }
+
+  /// [yaml] with the hosted urls that name an old address of this repository
+  /// replaced, or null when there are none.
+  ///
+  /// Edits the text in place rather than re-serialising a parsed document:
+  /// what goes back into the archive is the pubspec its author wrote, with
+  /// comments, quoting and key order intact and one url different. Round
+  /// tripping it through a YAML writer would hand the client a file that
+  /// differs from what was published in ways nobody asked for.
+  String? rewritePubspecYaml(
+    String yaml, {
+    required Uri canonical,
+    String? package,
+    String? version,
+  }) {
+    if (!enabled) return null;
+    final targets = _targetsFor(canonical);
+    if (targets.isEmpty) return null;
+    final replacement = _identity(canonical);
+
+    final YamlNode document;
+    try {
+      document = loadYamlNode(yaml);
+    } on YamlException catch (error) {
+      _log.warning('Could not parse the pubspec of $package $version; '
+          'serving it unchanged. $error');
+      return null;
+    }
+    if (document is! YamlMap) return null;
+
+    // Collected first and applied last-to-first, so replacing one url cannot
+    // move the offsets of the ones still to come.
+    final edits = <_UrlEdit>[];
+    for (final section in _sections) {
+      final deps = document.nodes[section];
+      if (deps is! YamlMap) continue;
+      for (final entry in deps.nodes.entries) {
+        final name = entry.key;
+        final dependency = name is YamlScalar ? name.value : name;
+        if (dependency is! String) continue;
+        final spec = entry.value;
+        if (spec is! YamlMap) continue;
+        if (spec.containsKey('path') ||
+            spec.containsKey('git') ||
+            spec.containsKey('sdk')) {
+          continue;
+        }
+        final hosted = spec.nodes['hosted'];
+        YamlNode? urlNode;
+        if (hosted is YamlScalar) {
+          urlNode = hosted;
+        } else if (hosted is YamlMap) {
+          final url = hosted.nodes['url'];
+          if (url is YamlScalar) urlNode = url;
+        }
+        final from = urlNode?.value;
+        if (urlNode == null || from is! String) continue;
+        final to = _rewriteUrl(from, targets, replacement);
+        if (to == null) continue;
+        edits.add(_UrlEdit(urlNode.span.start.offset, urlNode.span.end.offset,
+            from, to, dependency));
+      }
+    }
+    if (edits.isEmpty) return null;
+
+    edits.sort((a, b) => b.start.compareTo(a.start));
+    var result = yaml;
+    for (final edit in edits) {
+      final slice = result.substring(edit.start, edit.end);
+      // The span is the scalar and nothing else, so the url is in it — unless
+      // it was written with escapes, in which case leaving the file alone
+      // beats guessing at its spelling.
+      if (!slice.contains(edit.from)) continue;
+      result = result.replaceRange(
+          edit.start, edit.end, slice.replaceFirst(edit.from, edit.to));
+      _report(
+          package: package,
+          version: version,
+          dependency: edit.dependency,
+          from: edit.from,
+          to: edit.to);
+    }
+    return result == yaml ? null : result;
+  }
+
+  /// The addresses to look for when answering on [canonical], memoised: the
+  /// answer depends on nothing else, and both entry points ask for it per
+  /// published version.
+  List<String> _targetsFor(Uri canonical) {
+    if (_identitiesFor != canonical) {
+      _identities = _legacyIdentities(canonical);
+      _identitiesFor = canonical;
+    }
+    return _identities!;
   }
 
   /// The rewritten form of one dependency entry, or null to leave it alone.
@@ -306,4 +500,15 @@ class HostedUrlCompat {
     _log.fine('Pub compatibility rewrite: package=$package version=$version '
         'dependency=$dependency from=$from to=$to');
   }
+}
+
+/// One hosted url found in a pubspec's text, and what it should say.
+class _UrlEdit {
+  final int start;
+  final int end;
+  final String from;
+  final String to;
+  final String dependency;
+
+  _UrlEdit(this.start, this.end, this.from, this.to, this.dependency);
 }

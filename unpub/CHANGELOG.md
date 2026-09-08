@@ -1,3 +1,8 @@
+## 3.6.1
+
+### Fixed
+- `--legacy-hosted-url-rewrite` now rewrites the `pubspec.yaml` inside the package archive as well as the metadata, because the metadata alone fixed exactly one `pub get` per cleared cache. `dart pub` reads a hosted package's dependencies from the version listing only while that package is not yet in the local cache; once it has been extracted into `$PUB_CACHE/hosted/<host>/<package>-<version>/`, every later solve reads that copy instead — so the first resolution succeeded and the next one failed with the source conflict again. The stored archive is still never touched: the bytes are transformed on their way out, only that one url differs, and comments, quoting, key order, file modes and timestamps are carried through. The output is a deterministic function of the input, so the content hash does not move between requests or restarts, and an archive naming no old address is streamed straight through without being unpacked. What does change is that the archive a client receives is no longer byte-identical to the one it received before, so its content hash differs: each consumer needs one `dart pub cache clean`, after which `pub get` reports the hash in `pubspec.lock` is out of date, updates it, and succeeds. A cache still holding the old copy is not repaired, since pub does not re-download what it already has. A package store that redirects to its own download urls cannot be rewritten this way; the server warns once per package when that happens.
+
 ## 3.6.0
 
 ### Added
