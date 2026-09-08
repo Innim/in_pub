@@ -20,6 +20,7 @@ import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
 import 'package:in_pub/src/doc_store.dart';
 import 'package:in_pub/src/doc_progress_page.dart';
+import 'package:in_pub/src/hosted_url_compat.dart';
 import 'package:in_pub/src/auth/auth_middleware.dart';
 import 'package:in_pub/src/auth/http_helpers.dart';
 import 'package:in_pub/src/auth/identity.dart';
@@ -64,6 +65,10 @@ class App {
   /// http(s) proxy to call googleapis (to get uploader email)
   final String? googleapisProxy;
 
+  /// Serves versions published under an earlier address of this repository
+  /// as though they named its current one; see [HostedUrlCompat].
+  final HostedUrlCompat hostedUrlCompat;
+
   /// Whether a Google credential is still accepted for publishing.
   ///
   /// On by default, because it is how publishing has always worked here and
@@ -95,7 +100,14 @@ class App {
     this.uploadValidator,
     this.proxy_origin,
     this.version = '',
-  });
+    HostedUrlCompat? hostedUrlCompat,
+  }) :
+        // Off unless one is passed. The rewrite makes this server answer
+        // with something other than what was published, and it logs at
+        // FINE, so a default-on version of it would change what every
+        // deployment serves without any of them having asked or being told.
+        // Passing a [HostedUrlCompat] is the whole of the opt-in.
+        hostedUrlCompat = hostedUrlCompat ?? HostedUrlCompat.disabled();
 
   /// Whether [resolveGoogleBearer] has anything to do.
   ///
@@ -441,10 +453,24 @@ class App {
     return {
       'archive_url':
           _resolveUrl(req, '/packages/$name/versions/$version.tar.gz'),
-      'pubspec': item.pubspec,
+      'pubspec': _servedPubspec(item, req),
       'version': version,
     };
   }
+
+  /// Where this server is answering, as the client sees it. Also what the
+  /// compatibility layer rewrites old repository urls to, so the only
+  /// address it can ever name is the one the caller has just reached.
+  Uri _selfUri(shelf.Request req) => Uri.parse(_resolveUrl(req, '/'));
+
+  /// The stored pubspec as a client should see it: unchanged, except that a
+  /// dependency on this repository under an address it has since moved from
+  /// names the current one. Nothing is written back — see [HostedUrlCompat].
+  Map<String, dynamic> _servedPubspec(UnpubVersion item, shelf.Request req) =>
+      hostedUrlCompat.rewrite(item.pubspec,
+          canonical: _selfUri(req),
+          package: item.pubspec['name'] as String?,
+          version: item.version);
 
   /// Picks the version to show by default for a package: the highest stable
   /// version, or the highest prerelease (dev/alpha/beta) only when there is no
@@ -1171,7 +1197,11 @@ class App {
           semver.Version.parse(b.version), semver.Version.parse(a.version));
     });
 
-    var pubspec = packageVersion.pubspec;
+    // The served form, not the stored one: a dependency whose recorded url
+    // is an old address of this repository is the same package the solver
+    // will be handed, and linking it off to a hostname that no longer serves
+    // anything would be the web UI disagreeing with the API.
+    var pubspec = _servedPubspec(packageVersion, req);
     List<String> authors;
     if (pubspec['author'] != null) {
       authors = RegExp(r'<(.*?)>')
@@ -1190,7 +1220,7 @@ class App {
 
     var depMap =
         (pubspec['dependencies'] as Map? ?? {}).cast<String, dynamic>();
-    var selfUri = Uri.parse(_resolveUrl(req, '/'));
+    var selfUri = _selfUri(req);
     var dependencies = <DependencyView>[];
     for (var entry in depMap.entries) {
       dependencies.add(await resolveDependencyView(

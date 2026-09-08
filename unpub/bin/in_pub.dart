@@ -27,6 +27,21 @@ main(List<String> args) async {
   parser.addFlag('docs',
       help: 'Generate and serve API documentation (requires a Dart SDK).',
       defaultsTo: true);
+  parser.addFlag('legacy-hosted-url-rewrite',
+      help: 'Serve package versions published under an earlier address of\n'
+          'this repository as though their dependencies named its current\n'
+          'one. Only the API answer is rewritten; nothing stored changes.\n'
+          'Off by default: it makes this server answer with something other\n'
+          'than what was published, and a repository that never moved has\n'
+          'nothing to gain from it. Turn it on for the move to https.',
+      defaultsTo: false);
+  parser.addMultiOption('legacy-hosted-url',
+      help: 'Additional old addresses of this repository to rewrite to its\n'
+          'current one, comma separated. The same address over plain http\n'
+          'is always included and need not be listed: this is for a\n'
+          'hostname or port that was retired outright. Example:\n'
+          'http://pub.old.example.org',
+      splitCommas: true);
   parser.addFlag('verbose',
       abbr: 'v',
       negatable: false,
@@ -44,6 +59,22 @@ main(List<String> args) async {
   final proxy_origin = results['proxy-origin'] as String;
   final dartExecutable = results['dart-executable'] as String;
   final docsEnabled = results['docs'] as bool;
+  final legacyUrlRewrite = results['legacy-hosted-url-rewrite'] as bool;
+  final legacyHostedUrls =
+      _legacyHostedUrls(results['legacy-hosted-url'] as List<String>);
+  // Said out loud, both ways round. The rewrite changes what the repository
+  // API answers with and logs only at FINE, so an operator who turned it on
+  // and one who forgot to would otherwise see the same silent boot.
+  if (legacyUrlRewrite) {
+    print('Rewriting legacy hosted urls to this server\'s own address'
+        '${legacyHostedUrls.isEmpty ? '' : ', including '
+            '${legacyHostedUrls.join(', ')}'}. '
+        'Run with --verbose to see each rewrite.');
+  } else if (legacyHostedUrls.isNotEmpty) {
+    print('Warning: --legacy-hosted-url is ignored without '
+        '--legacy-hosted-url-rewrite, which is off by default. Nothing will '
+        'be rewritten.');
+  }
 
   if (results.rest.isNotEmpty) {
     print('Got unexpected arguments: "${results.rest.join(' ')}".\n\nUsage:\n');
@@ -159,6 +190,8 @@ main(List<String> args) async {
       googleAuth: googleAuth,
       googleapisProxy: googleapisProxy.isEmpty ? null : googleapisProxy,
       version: version,
+      hostedUrlCompat: in_pub.HostedUrlCompat(
+          enabled: legacyUrlRewrite, legacyUrls: legacyHostedUrls),
       proxy_origin:
           proxy_origin.trim().isEmpty ? null : Uri.parse(proxy_origin));
 
@@ -184,6 +217,47 @@ main(List<String> args) async {
     },
     closeDatabase: () => db.close(),
   ).install();
+}
+
+/// The `--legacy-hosted-url` values, checked before anything is opened.
+///
+/// A misspelled address here is silently ineffective — it simply matches no
+/// pubspec — and the operator would find out only when a `pub get` they
+/// thought they had fixed still failed, so the server refuses to start on
+/// one instead. Checked whether or not the rewrite is switched on, so a
+/// typo in a config being staged is reported when it is written rather than
+/// when it is finally enabled.
+List<Uri> _legacyHostedUrls(List<String> values) {
+  final result = <Uri>[];
+  final errors = <String>[];
+  for (final value in values) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) continue;
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      errors.add('"$trimmed" is not an absolute url: expected something like '
+          'http://pub.old.example.org');
+      continue;
+    }
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      errors.add('"$trimmed" must be http or https, not "${uri.scheme}"');
+      continue;
+    }
+    if (uri.hasQuery || uri.hasFragment) {
+      errors.add('"$trimmed" must be a bare repository address, without a '
+          'query or fragment');
+      continue;
+    }
+    result.add(uri);
+  }
+  if (errors.isNotEmpty) {
+    print('--legacy-hosted-url is misconfigured:');
+    for (final error in errors) {
+      print('  - $error');
+    }
+    exit(1);
+  }
+  return result;
 }
 
 void _addAuthOptions(ArgParser parser) {
