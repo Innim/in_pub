@@ -2,6 +2,10 @@ import 'package:in_pub/src/auth/auth_store.dart';
 import 'package:in_pub/src/auth/identity.dart';
 import 'package:in_pub/src/auth/mongo_auth_store.dart';
 import 'package:mongo_dart/mongo_dart.dart';
+// The only way this driver version will send a command the modern way. See
+// `runCommand` below for why the public helpers are not usable here.
+// ignore: implementation_imports
+import 'package:mongo_dart/src/database/message/mongo_modern_message.dart';
 import 'package:test/test.dart';
 
 import 'memory_auth_store.dart';
@@ -343,6 +347,18 @@ void main() {
   });
 
   group('the indexes the queries need', () {
+    /// Sends [command] as OP_MSG.
+    ///
+    /// `Db.executeDbCommand` and `DbCollection.getIndexes` both still write
+    /// OP_QUERY, which MongoDB dropped in 5.1: against a modern server the
+    /// first fails with `UnsupportedOpQueryCommand` and the second quietly
+    /// answers with nothing at all. That made these two tests pass against
+    /// the 5.0 a developer runs locally and fail on CI's 7, reporting no
+    /// indexes on a collection that had just been given them.
+    Future<Map<String, Object?>> runCommand(Map<String, Object> command) =>
+        db.executeModernMessage(
+            MongoModernMessage({...command, r'$db': db.databaseName!}));
+
     /// Removes every index but `_id`, so that what [MongoAuthStore.ensureIndexes]
     /// declares is what these tests see.
     ///
@@ -351,11 +367,10 @@ void main() {
     /// on any machine that had ever run the build that lacked them.
     Future<void> dropIndexes(String collection) async {
       try {
-        await db.executeDbCommand(DbCommand.createQueryDbCommand(
-            db, {'dropIndexes': collection, 'index': '*'}));
-      } catch (_) {
-        // A collection this database has never held has no indexes to drop.
-      }
+        // A collection this database has never held reports `ok: 0` rather
+        // than throwing, which is just as good an answer: nothing to drop.
+        await runCommand({'dropIndexes': collection, 'index': '*'});
+      } catch (_) {}
     }
 
     setUp(() async {
@@ -365,7 +380,10 @@ void main() {
 
     /// Every field any index on [collection] is keyed by.
     Future<Set<String>> indexedFields(String collection) async {
-      var indexes = await db.collection(collection).getIndexes();
+      // `$indexStats` rather than `getIndexes`, for the reason above.
+      var indexes = await db.collection(collection).modernAggregate([
+        {r'$indexStats': <String, dynamic>{}}
+      ]).toList();
       return indexes
           .expand((index) => (index['key'] as Map).keys)
           .whereType<String>()
