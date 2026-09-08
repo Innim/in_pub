@@ -76,6 +76,10 @@ class DetailComponent implements OnInit, OnActivate {
     if (name != null) {
       packageName = name;
       packageVersion = version;
+      // Named from the url rather than from the fetched package, so the tab
+      // is right while the request is still in flight — and stays right when
+      // it comes back saying there is no such package.
+      appService.setPageTitle(version == null ? name : '$name $version');
       packageLoaded = false;
       packageNotExists = false;
       appService.setLoading(true);

@@ -15,6 +15,7 @@ import 'package:archive/archive.dart';
 import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/models.dart';
 import 'package:in_pub/unpub_api/lib/models.dart';
+import 'package:in_pub/unpub_api/lib/page_title.dart';
 import 'package:in_pub/unpub_api/lib/spa_routes.dart';
 import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
@@ -1359,6 +1360,10 @@ class App {
   /// reverting to the unversioned url this exists to avoid — the moment
   /// webdev changed a quote or reordered an attribute.
   String get _indexHtml => _indexHtmlBody ??= index_html.content({
+        // What the tab says until the application has loaded and named the
+        // page it is showing. The same constant the web UI composes its own
+        // titles from, so the two cannot disagree over the repository's name.
+        'APP_TITLE': appTitle,
         'APP_VERSION': version,
         'BUNDLE_VERSION': _mainDartJsTag.replaceAll('"', ''),
       });
