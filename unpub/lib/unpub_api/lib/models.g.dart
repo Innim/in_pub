@@ -36,6 +36,34 @@ Map<String, dynamic> _$ListApiPackageToJson(ListApiPackage instance) =>
       'updatedAt': instance.updatedAt.toIso8601String(),
     };
 
+RecentApiPublication _$RecentApiPublicationFromJson(
+        Map<String, dynamic> json) =>
+    RecentApiPublication(
+      json['name'] as String,
+      json['version'] as String,
+      json['description'] as String?,
+      DateTime.parse(json['publishedAt'] as String),
+    );
+
+Map<String, dynamic> _$RecentApiPublicationToJson(
+        RecentApiPublication instance) =>
+    <String, dynamic>{
+      'name': instance.name,
+      'version': instance.version,
+      'description': instance.description,
+      'publishedAt': instance.publishedAt.toIso8601String(),
+    };
+
+RecentApi _$RecentApiFromJson(Map<String, dynamic> json) => RecentApi(
+      (json['publications'] as List<dynamic>)
+          .map((e) => RecentApiPublication.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+
+Map<String, dynamic> _$RecentApiToJson(RecentApi instance) => <String, dynamic>{
+      'publications': instance.publications,
+    };
+
 DetailViewVersion _$DetailViewVersionFromJson(Map<String, dynamic> json) =>
     DetailViewVersion(
       json['version'] as String,

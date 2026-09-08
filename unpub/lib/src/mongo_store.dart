@@ -115,4 +115,32 @@ class MongoStore extends MetaStore {
 
     return _queryPackagesBySelector(selector);
   }
+
+  @override
+  Future<List<UnpubRecentPublication>> queryRecentPublications({
+    required int size,
+  }) async {
+    // Aggregated rather than queried: versions are an array inside the
+    // package document, so ordering documents can only ever order packages.
+    // `$unwind` makes each version a row of its own, which is what the feed
+    // is a list of — two versions of one package are two rows.
+    final rows = await db.collection(packageCollection).aggregateToStream([
+      {r'$unwind': r'$versions'},
+      {
+        r'$sort': {'versions.createdAt': -1}
+      },
+      {r'$limit': size},
+      {
+        r'$project': {'name': 1, 'versions': 1}
+      },
+    ]).toList();
+
+    return [
+      for (var row in rows)
+        UnpubRecentPublication(
+          row['name'] as String,
+          UnpubVersion.fromJson(row['versions'] as Map<String, dynamic>),
+        ),
+    ];
+  }
 }
