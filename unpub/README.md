@@ -54,6 +54,7 @@ main(List<String> args) async {
 | `googleapisProxy` | Http(s) proxy to call googleapis (to get uploader email) | - |
 | `uploadValidator` | See [Package validator](#package-validator) | - |
 | `auth` | See [Sign-in required](#sign-in-required) | - (open) |
+| `hostedUrlCompat` | See [Moving the repository to https](#moving-the-repository-to-https) | - (off) |
 
 
 ### Sign-in required
@@ -367,6 +368,76 @@ proxy_set_header X-Forwarded-Proto $scheme;
 # Trying to set 'Transfer-Encoding: Chunked' on HTTP 1.0 headers
 proxy_http_version 1.1;
 ```
+
+### Moving the repository to https
+
+Authentication needs https — `dart pub token add` refuses a plain-http url —
+but pub treats a package's repository url as part of its identity, so a
+version published years ago carrying
+
+```yaml
+dependencies:
+  innim_lib:
+    hosted: http://pub.example.org
+```
+
+asks for a *different* `innim_lib` than an application that asks for the same
+package on `https://pub.example.org`. The solver reports the two as an
+unsatisfiable conflict rather than as one package, which would leave only
+three ways forward: republish every old version, override them in every
+consumer, or serve the old metadata under the new address.
+
+The server can do the third, when asked. Switched on, it looks at every
+repository API answer it sends over https: a dependency naming the *same*
+address over plain http is served as https instead.
+
+```sh
+dart pub global run in_pub --proxy-origin https://pub.example.org \
+  --legacy-hosted-url-rewrite
+```
+
+It is **off by default**, and deliberately so: it makes the repository answer
+with something other than what was published, and it reports each rewrite at
+`FINE`, where the default log level shows nothing. On by default, a mistaken
+rewrite would be silent; off by default, a missing one is a `pub get` that
+fails with the conflict above and a README section naming the flag. A
+repository that never moved has nothing to gain from it either way.
+
+With it on, `--verbose` shows what is being changed:
+
+```text
+Pub compatibility rewrite: package=innim_iap_google_apple version=1.0.0
+dependency=innim_lib from=http://pub.example.org to=https://pub.example.org
+```
+
+Nothing stored changes. Archives keep the `pubspec.yaml` they were published
+with, their content hashes stay valid, no version number moves, and switching
+the layer off again restores the previous answers exactly — there is nothing
+to migrate back. It also does not excuse a bad publish: new versions should
+name the https address, and one that already does is left untouched.
+
+Only this repository's own address is rewritten. A dependency on another
+hosted repository, on `git`, `path` or an sdk, is served as published, and the
+match is on the parsed address rather than on the text, so
+`http://pub.example.org.attacker.test` is a different host and stays one.
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--legacy-hosted-url-rewrite` | Rewrite old addresses of this repository in the metadata it serves. | off |
+| `--legacy-hosted-url` | Further old addresses to rewrite to the current one, comma separated. The same address over plain http is always included and need not be listed; this is for a hostname or port retired outright, e.g. `http://pub.old.example.org`. Ignored without the flag above. | - |
+
+The address rewritten *to* is the one the server is answering on, which
+behind a TLS-terminating proxy means `--proxy-origin` has to be set — the
+same setting the archive urls already depend on. Without it the server sees
+its own plain-http address, finds no https counterpart, and rewrites nothing.
+
+Rewriting happens on the way out, and this server holds no metadata cache, so
+there is nothing to invalidate. The pub client does keep one, at
+`$PUB_CACHE/hosted/<host>/.cache/<package>-versions.json`; a consumer that
+had already fetched a listing may need `dart pub cache clean` before the new
+answer is used.
+
+Each distinct rewrite is reported once per run, not on every `pub get`.
 
 ### Package validator
 

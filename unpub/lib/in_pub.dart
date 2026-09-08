@@ -3,6 +3,7 @@ export 'src/mongo_store.dart';
 export 'src/package_store.dart';
 export 'src/file_store.dart';
 export 'src/doc_store.dart';
+export 'src/hosted_url_compat.dart';
 export 'src/address.dart';
 export 'src/app.dart';
 export 'src/models.dart';
