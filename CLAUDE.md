@@ -56,3 +56,15 @@ To add a new template variable:
 - Use `fvm dart` / `fvm flutter`, not bare `dart`.
 - Do not use `dependency_overrides` or dev package versions unless there is truly no
   stable alternative (ngdart 8.x dev is the documented exception).
+
+## Changelog and commit messages
+
+Keep both compact. Length is not evidence of care.
+
+- `CHANGELOG.md` records only what a user of the server needs to know: what changed
+  and, where it matters, what they have to do about it. One short entry per change.
+  Reasoning, alternatives weighed and implementation detail do not go here.
+- A commit subject follows Conventional Commits and stands on its own. Write a body
+  only when it carries something the subject cannot — a non-obvious cause, a decision
+  that needed a choice, a consequence for whoever upgrades. If it can be left out,
+  leave it out and ship the one line.
