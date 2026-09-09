@@ -1,3 +1,14 @@
+## 3.7.0
+
+### Added
+- The home page opens with a feed of the nine most recent publications, above the popular packages it showed alone before; `/webapi/recent` serves it. One entry per published version rather than per package, each naming the version that went up and linking to that version's page.
+
+### Changed
+- The browser tab is titled with the page it is showing — the package and, on a version page, its version; what was searched for; `Packages`, `Account`, `Administration` — instead of a fixed `in_pub` everywhere. The title is stamped into the served shell too, so it holds before the bundle loads.
+
+### Breaking
+- `MetaStore` gains `queryRecentPublications`, which the feed is read through. The bundled MongoDB store implements it; a store of your own has to, or it no longer satisfies the interface.
+
 ## 3.6.1
 
 ### Fixed
@@ -6,11 +17,7 @@
 ## 3.6.0
 
 ### Added
-- The home page opens with a feed of what has been published recently, above the popular packages it showed alone before, and `/webapi/recent` serves it. One entry per published version rather than per package: a package released twice appears twice, and each entry names the version that actually went up and links to that version's page. That is what the package list cannot say — it carries a package's highest stable version, so a fix released on an older line would show up next to a fresh timestamp under a version number that had not moved. The feed is aggregated over the stored versions themselves, ordered by the publication date each already carries, so nothing new is written on publish; the endpoint is capped at a hundred entries, since unlike a page of the package list its work grows with the whole repository. Nine entries on the home page, against fifteen packages in the popular list below it; either list is left out if the server will not answer for it, rather than taking the other off the page with it.
 - `--legacy-hosted-url-rewrite`, which serves versions published under an earlier address of this repository as though their dependencies named its current one. Authentication needs https — `dart pub token add` refuses a plain-http url — but pub treats a package's repository url as part of its identity, so a version published against `http://pub.example.org` asks for a *different* package than an application asking for it on `https://pub.example.org`, and the solver reports the two as an unsatisfiable conflict. That left only republishing every old version, overriding them in every consumer, or serving the old metadata under the new address; this is the third. Only the repository API answer changes: archives keep the `pubspec.yaml` they were published with, their content hashes stay valid, no version number moves, and switching the flag off restores the previous answers exactly. It covers `dependencies`, `dev_dependencies` and `dependency_overrides`, both the `hosted: <url>` and the `hosted: {name, url}` forms, and leaves `git`, `path`, `sdk` and every other repository alone. The address rewritten *to* is the one the server is answering on, so the only url it can produce is one the client has just reached — an https caller can never be sent to an http endpoint. Matching is on the parsed address rather than the text, so `http://pub.example.org.attacker.test` is a different host, as is the same host on another port or path prefix. Off by default: it makes the repository answer with something other than what was published and reports each rewrite at `FINE`, where the default log level shows nothing, so on-by-default a mistaken rewrite would be silent while a missing one is a `pub get` that fails loudly. Behind a TLS-terminating proxy it needs `--proxy-origin`, the same setting the archive urls already depend on. `--legacy-hosted-url` adds addresses that were retired outright; the same address over plain http is derived and need not be listed.
-
-### Changed
-- The browser tab is titled with the page it is showing, rather than a fixed `in_pub` on every one of them: a package's name and, on a version page, its version; what was searched for; `Packages`, `Account`, `Administration`; and the repository's name alone on the home page. Written pub.dev's way round, the specific part first, because the first few characters are all a tab strip has room for. The name is declared once, in `unpub_api/page_title.dart`, and stamped into the served shell through the build-time template mechanism, so what a tab says before the bundle has loaded is what it goes on saying.
 
 ## 3.5.1
 
