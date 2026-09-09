@@ -7,6 +7,7 @@ import 'package:ngdart/angular.dart';
 import 'package:unpub_web/constants.dart';
 import 'src/routes.dart';
 import 'package:unpub_api/models.dart';
+import 'package:unpub_api/page_title.dart';
 
 class PackageNotExistsException implements Exception {
   final String message;
@@ -56,6 +57,22 @@ class AppService {
 
   void setLoading(bool value) {
     loading = value;
+  }
+
+  /// Names the page the browser tab is showing.
+  ///
+  /// Every screen calls this as it activates, [page] being what that screen
+  /// is about — a package's name, `Account`, or null for the home page,
+  /// which is the repository itself. Screens rather than the router, because
+  /// what a page is about is not always in its url: the package screen has
+  /// only a name to go on until the request comes back, and the list screen
+  /// says what was searched for.
+  ///
+  /// Set on the document directly rather than held as a field: the title
+  /// lives in `<head>`, outside the application's own markup, so there is no
+  /// binding to render it through.
+  void setPageTitle([String? page]) {
+    html.document.title = pageTitle(page);
   }
 
   /// Decodes a response body, or says plainly that it was not JSON — a bare

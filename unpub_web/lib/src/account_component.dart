@@ -55,6 +55,9 @@ class AccountComponent implements OnActivate, OnDestroy {
   @override
   void onActivate(RouterState? previous, RouterState current) async {
     tab = current.queryParameters['tab'] == 'sessions' ? 'sessions' : 'tokens';
+    // Ahead of the tab-switch return below: the title is owed to every
+    // arrival, and a tab is not a page of its own.
+    appService.setPageTitle('Account');
 
     // Switching tabs is a navigation — the tab lives in the query string —
     // but it is pure client-side state. Nothing else here may run for it:
