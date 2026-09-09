@@ -48,8 +48,8 @@ abstract class MetaStore {
   /// extension point (README, "Customize meta and package store"): an
   /// implementation outside this repository must not stop compiling for a
   /// probe it never asked for. The default asks for a single package, which
-  /// is the cheapest round trip this interface can express; a store that
-  /// can do better — [MongoStore] counts, and reads nothing — overrides it.
+  /// is the cheapest round trip this interface can express; a store that can
+  /// do better — [MongoStore] asks for one document's `_id` — overrides it.
   Future<void> checkHealth() async {
     await queryPackages(size: 1, page: 0, sort: 'download');
   }
