@@ -86,6 +86,15 @@ class App {
 
   final String version;
 
+  /// How long `/health` waits for the metadata store before calling it
+  /// unreachable.
+  ///
+  /// Bounded because the answer is for a monitor: a database that has stopped
+  /// answering must end as a failed check rather than as a probe left hanging
+  /// until the monitor's own timeout, which reads as a network problem
+  /// instead of a database one.
+  final Duration healthProbeTimeout;
+
   /// validate if the package can be published
   ///
   /// for more details, see: https://github.com/Innim/in_pub#package-validator
@@ -104,6 +113,7 @@ class App {
     this.uploadValidator,
     this.proxy_origin,
     this.version = '',
+    this.healthProbeTimeout = const Duration(seconds: 5),
     HostedUrlCompat? hostedUrlCompat,
   }) :
         // Off unless one is passed. The rewrite makes this server answer
@@ -498,6 +508,61 @@ class App {
   /// Built once, for the same reason as the auth router: a getter rebuilt
   /// the whole table on every request.
   late final Router router = _$AppRouter(this);
+
+  /// What a monitor polls: is this server up, and can it still reach the
+  /// store it keeps every package's metadata in?
+  ///
+  /// Answers 200 when the store answered and 503 when it did not, so a check
+  /// that reads nothing but the status code is already right.
+  ///
+  /// The same answer for everybody, which is what makes it safe to leave
+  /// public — `classifyRoute` has reserved this path since before there was
+  /// a handler on it, and the gate resolves no credential for a public
+  /// route, so this handler could not tell a signed-in caller from anyone
+  /// else even if it wanted to. Nothing here describes what the repository
+  /// holds: a package count would have been a number an anonymous caller
+  /// could poll every few seconds, and a count polled on a schedule is a
+  /// publication feed for a repository whose whole point is that outsiders
+  /// cannot watch one.
+  @Route.get('/health')
+  Future<shelf.Response> health(shelf.Request req) async {
+    final watch = Stopwatch()..start();
+    Object? failure;
+    try {
+      await metaStore.checkHealth().timeout(healthProbeTimeout);
+    } catch (e) {
+      // Logged in full here and named only by type in the answer: the
+      // message of a driver error carries the connection string, and this
+      // endpoint is read by anyone who asks.
+      print('Health check failed: $e');
+      failure = e;
+    }
+    watch.stop();
+
+    final healthy = failure == null;
+
+    return shelf.Response(
+      healthy ? HttpStatus.ok : HttpStatus.serviceUnavailable,
+      headers: {
+        HttpHeaders.contentTypeHeader: jsonContentType,
+        // An answer served out of a proxy's cache says only that the server
+        // was up when the entry was stored.
+        HttpHeaders.cacheControlHeader: 'no-store',
+      },
+      body: json.encode({
+        'status': healthy ? 'ok' : 'error',
+        'checks': {
+          'database': {
+            'status': healthy ? 'ok' : 'error',
+            if (healthy)
+              'latencyMs': watch.elapsedMilliseconds
+            else
+              'error': failure.runtimeType.toString(),
+          },
+        },
+      }),
+    );
+  }
 
   @Route.get('/api/packages/<name>')
   Future<shelf.Response> getVersions(shelf.Request req, String name) async {

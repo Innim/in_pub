@@ -354,6 +354,36 @@ From the command line docs are enabled by default; use `--no-docs` to disable
 them and `--dart-executable` to point at a specific Dart SDK.
 
 
+### Health check
+
+`GET /health` is the endpoint to point a monitor at. It answers 200 while the
+server can reach its metadata store and 503 when it cannot, so a check that
+reads nothing but the status code is already right. The answer is never cached.
+
+```json
+{ "status": "ok", "checks": { "database": { "status": "ok", "latencyMs": 4 } } }
+```
+
+The check is a real query, not a look at the driver's connection state — a
+database that has stopped answering keeps a socket that still calls itself
+open. A store that does not answer within 5 seconds counts as unreachable, and
+the failing check names the error by type; the full error, connection string
+and all, goes to the server log.
+
+```json
+{
+  "status": "error",
+  "checks": { "database": { "status": "error", "error": "TimeoutException" } }
+}
+```
+
+The route is public and stays that way with `--auth` on, so that a monitor
+needs no credential. It is the same answer for every caller: nothing in it
+describes what this repository holds. A package count would have been a number
+anybody could poll every few seconds, and a count read on a schedule is a
+publication feed for a repository whose whole point is that outsiders cannot
+watch one.
+
 ### Usage behind reverse-proxy
 
 Using in_pub behind reverse proxy(nginx or another), ensure you have necessary headers

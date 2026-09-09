@@ -10,6 +10,11 @@ Router _$AppRouter(App service) {
   final router = Router();
   router.add(
     'GET',
+    r'/health',
+    service.health,
+  );
+  router.add(
+    'GET',
     r'/api/packages/<name>',
     service.getVersions,
   );

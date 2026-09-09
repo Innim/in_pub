@@ -117,6 +117,15 @@ class MongoStore extends MetaStore {
   }
 
   @override
+  Future<void> checkHealth() async {
+    // A count over the whole collection, which Mongo answers out of its own
+    // metadata: it proves the connection still carries a query without
+    // reading a document to do it. The number is discarded — `/health` does
+    // not report one.
+    await db.collection(packageCollection).count();
+  }
+
+  @override
   Future<List<UnpubRecentPublication>> queryRecentPublications({
     required int size,
   }) async {
