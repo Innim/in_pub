@@ -57,6 +57,29 @@ To add a new template variable:
 - Do not use `dependency_overrides` or dev package versions unless there is truly no
   stable alternative (ngdart 8.x dev is the documented exception).
 
+## Before handing work over
+
+Mandatory, every time — not "when the change looks risky". Run all four from
+`unpub/` and report what they said:
+
+```
+fvm dart pub get
+fvm dart analyze
+fvm dart format --output=none --set-exit-if-changed .
+fvm dart test
+```
+
+These are exactly what CI runs (`.github/workflows/analyze-and-test.yml`). A
+change is not done until they are green locally; reporting it done on anything
+less is how a red CI gets handed over.
+
+`dart test` needs MongoDB on `localhost:27017`. CI runs the suite against
+**both** versions of its matrix, and they disagree: MongoDB removed the legacy
+OP_QUERY opcode in 5.1, so a mongo_dart call implemented over it passes on
+5.0.6 (what the deployment runs) and is refused on 7 (what it would be upgraded
+to). `.dev/docker-compose.yml` starts 5.0.6 only, so testing against it alone
+is not testing the matrix — run the suite a second time against `mongo:7`.
+
 ## Changelog and commit messages
 
 Keep both compact. Length is not evidence of care.

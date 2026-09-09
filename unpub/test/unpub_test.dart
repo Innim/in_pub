@@ -560,4 +560,31 @@ main() {
       expect(recent.map((e) => e.version.version), ['1.9.1', '1.0.9']);
     });
   });
+
+  // The probe `/health` runs, against a real database rather than a fake:
+  // what it has to prove is that the query reaches Mongo and comes back,
+  // which a stubbed store cannot say anything about.
+  group('health check', () {
+    late MongoStore store;
+
+    setUpAll(() async {
+      await _cleanUpDb();
+      store = MongoStore(_db);
+    });
+
+    test('an open connection answers the probe', () async {
+      await expectLater(store.checkHealth(), completes);
+    });
+
+    test('a closed connection fails it', () async {
+      // The state `/health` exists to report. It has to arrive as a thrown
+      // error rather than as a probe that quietly succeeds, which is what
+      // reading a connection flag would have given.
+      var db = Db('mongodb://localhost:27017/dart_pub_test');
+      await db.open();
+      await db.close();
+
+      await expectLater(MongoStore(db).checkHealth(), throwsA(anything));
+    });
+  });
 }

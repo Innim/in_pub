@@ -1,3 +1,8 @@
+## Unreleased
+
+### Added
+- `GET /health` for monitoring: 200 while the database answers, 503 when it does not. Public, no credential needed.
+
 ## 3.7.0
 
 ### Added

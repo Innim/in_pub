@@ -117,6 +117,22 @@ class MongoStore extends MetaStore {
   }
 
   @override
+  Future<void> checkHealth() async {
+    // One document's `_id` and nothing else: the smallest answer the server
+    // can be asked for that still proves the connection carries a query.
+    //
+    // `findOne` rather than `count`, which reads no document at all and would
+    // otherwise be the obvious probe: mongo_dart 0.7.4 implements `count`
+    // over the legacy OP_QUERY opcode, and MongoDB removed that in 5.1 —
+    // against a 5.1-or-newer server every call is refused with
+    // `Unsupported OP_QUERY command: count`, so the probe would have reported
+    // the database unreachable on exactly the versions this repository is
+    // headed for. `findOne` picks the modern OP_MSG path where the server has
+    // one and falls back on the legacy path where it does not.
+    await db.collection(packageCollection).findOne(where.fields(['_id']));
+  }
+
+  @override
   Future<List<UnpubRecentPublication>> queryRecentPublications({
     required int size,
   }) async {
