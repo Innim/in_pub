@@ -45,6 +45,9 @@ class ListComponent implements OnInit, OnActivate {
   void onActivate(RouterState? previous, RouterState current) async {
     q = current.queryParameters['q'];
     appService.keyword = q ?? '';
+    // What was searched for, so a tab left open on a search still says which
+    // one. `/packages` with nothing to search for is the whole list.
+    appService.setPageTitle(q?.isEmpty ?? true ? 'Packages' : 'Search: $q');
     currentPage = int.tryParse(current.queryParameters['page'] ?? '0') ?? 0;
     appService.setLoading(true);
     data = await appService.fetchPackages(size: size, page: currentPage, q: q);

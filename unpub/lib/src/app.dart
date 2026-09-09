@@ -15,6 +15,7 @@ import 'package:archive/archive.dart';
 import 'package:in_pub/src/address.dart';
 import 'package:in_pub/src/models.dart';
 import 'package:in_pub/unpub_api/lib/models.dart';
+import 'package:in_pub/unpub_api/lib/page_title.dart';
 import 'package:in_pub/unpub_api/lib/spa_routes.dart';
 import 'package:in_pub/src/meta_store.dart';
 import 'package:in_pub/src/package_store.dart';
@@ -566,14 +567,76 @@ class App {
     }
 
     if (packageStore.supportsDownloadUrl) {
+      // Nothing passes through this server on that path, so the pubspec
+      // inside cannot be rewritten. Said once, because the resulting failure
+      // — a `pub get` that works on a clean cache and not afterwards — gives
+      // no hint of its cause.
+      _warnArchiveRewriteUnavailable(name, version, req);
       return shelf.Response.found(
           await packageStore.downloadUrl(name, version));
-    } else {
+    }
+
+    var rewritten = await _rewrittenArchive(name, version, req);
+    if (rewritten != null) {
       return shelf.Response.ok(
-        packageStore.download(name, version),
-        headers: {HttpHeaders.contentTypeHeader: ContentType.binary.mimeType},
+        rewritten,
+        headers: {
+          HttpHeaders.contentTypeHeader: ContentType.binary.mimeType,
+          // Known in full, unlike the streamed answer below.
+          HttpHeaders.contentLengthHeader: '${rewritten.length}',
+        },
       );
     }
+
+    return shelf.Response.ok(
+      packageStore.download(name, version),
+      headers: {HttpHeaders.contentTypeHeader: ContentType.binary.mimeType},
+    );
+  }
+
+  /// The archive with the `pubspec.yaml` inside it named at this server's
+  /// current address, or null when it needs no change and should be streamed
+  /// straight through.
+  ///
+  /// Rewriting the metadata is not enough on its own: pub reads a hosted
+  /// package's dependencies from the version listing only until it has the
+  /// package extracted in its cache, and from that copy afterwards. See
+  /// [HostedUrlCompat.rewriteArchive].
+  ///
+  /// The stored pubspec decides whether to bother. It is the same content as
+  /// the one in the archive, and reading it costs a lookup this request has
+  /// already done — so a repository where nothing was published under an old
+  /// address never unpacks a single tarball.
+  Future<List<int>?> _rewrittenArchive(
+      String name, String version, shelf.Request req) async {
+    if (!hostedUrlCompat.enabled) return null;
+    var package = await metaStore.queryPackage(name);
+    var stored =
+        package?.versions.firstWhereOrNull((v) => v.version == version);
+    if (stored == null) return null;
+    var canonical = _selfUri(req);
+    if (identical(hostedUrlCompat.rewrite(stored.pubspec, canonical: canonical),
+        stored.pubspec)) {
+      return null;
+    }
+    return hostedUrlCompat.rewriteArchive(await _readTarball(name, version),
+        canonical: canonical, package: name, version: version);
+  }
+
+  /// Packages already reported as unrewritable, so a repeated `pub get` does
+  /// not repeat the warning.
+  final Set<String> _redirectWarned = {};
+
+  void _warnArchiveRewriteUnavailable(
+      String name, String version, shelf.Request req) {
+    if (!hostedUrlCompat.enabled) return;
+    if (!_redirectWarned.add('$name $version')) return;
+    if (_redirectWarned.length > 1000) _redirectWarned.clear();
+    print('Warning: $name $version is served by a redirect to the package '
+        'store, so the pubspec inside its archive cannot be rewritten. '
+        'A consumer will resolve it once on a clean cache and fail on every '
+        'run after that. Use a package store this server streams through, or '
+        'republish the affected versions.');
   }
 
   Future<List<int>> _readTarball(String name, String version) async {
@@ -1394,6 +1457,10 @@ class App {
   /// reverting to the unversioned url this exists to avoid — the moment
   /// webdev changed a quote or reordered an attribute.
   String get _indexHtml => _indexHtmlBody ??= index_html.content({
+        // What the tab says until the application has loaded and named the
+        // page it is showing. The same constant the web UI composes its own
+        // titles from, so the two cannot disagree over the repository's name.
+        'APP_TITLE': appTitle,
         'APP_VERSION': version,
         'BUNDLE_VERSION': _mainDartJsTag.replaceAll('"', ''),
       });

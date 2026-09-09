@@ -29,6 +29,8 @@ class HomeComponent implements OnActivate {
   @override
   void onActivate(RouterState? previous, RouterState current) async {
     appService.keyword = '';
+    // The home page is the repository itself, so it takes the bare name.
+    appService.setPageTitle();
     appService.setLoading(true);
     try {
       // Both at once: two independent lists, and waiting for them in turn

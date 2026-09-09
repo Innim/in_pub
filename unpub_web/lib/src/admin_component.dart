@@ -31,6 +31,8 @@ class AdminComponent implements OnActivate {
 
   @override
   void onActivate(RouterState? previous, RouterState current) async {
+    // The header calls this section Administration; so does the tab.
+    appService.setPageTitle('Administration');
     // Retried on the way back in when the last attempt failed: otherwise a
     // moment's trouble on first load is permanent for the life of the
     // screen, with nothing to click.

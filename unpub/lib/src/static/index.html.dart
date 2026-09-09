@@ -1,7 +1,7 @@
 String content(Map<String, String> vars) => """<!DOCTYPE html>
 <html>
   <head>
-    <title>in_pub</title>
+    <title>${vars['APP_TITLE'] ?? ''}</title>
     <meta charset="utf-8" />
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />

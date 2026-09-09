@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:archive/archive.dart';
 import 'package:in_pub/in_pub.dart';
 import 'package:test/test.dart';
 
@@ -344,6 +347,9 @@ void main() {
     });
   });
 
+  _yamlGroup();
+  _archiveGroup();
+
   group('the layer as a whole', () {
     test('applying it twice changes nothing the second time', () {
       var pubspec = one('innim_lib', {
@@ -397,6 +403,268 @@ void main() {
       expect(result['dependencies']['collection'], '^1.15.0');
       expect(result.keys.toList(),
           ['name', 'version', 'environment', 'dependencies']);
+    });
+  });
+}
+
+/// The text-level rewrite, which is what goes back into the archive.
+///
+/// Separate from the map rewrite above because it has a different obligation:
+/// the map only has to be correct, this also has to hand back the file its
+/// author wrote — comments, quoting and key order intact, one url different.
+void _yamlGroup() {
+  final canonical = Uri.parse('https://pub.example.org');
+  final compat = HostedUrlCompat();
+
+  String? rewrite(String yaml, {HostedUrlCompat? using}) =>
+      (using ?? compat).rewritePubspecYaml(yaml, canonical: canonical);
+
+  group('the pubspec text', () {
+    test('an old url is replaced where it stands', () {
+      var result = rewrite('''
+name: package_a
+dependencies:
+  innim_lib:
+    hosted: http://pub.example.org
+    version: ^1.0.0
+''');
+
+      expect(result, '''
+name: package_a
+dependencies:
+  innim_lib:
+    hosted: https://pub.example.org
+    version: ^1.0.0
+''');
+    });
+
+    test('comments, blank lines and key order survive', () {
+      var result = rewrite('''
+name: package_a
+# The library everything here is built on.
+dependencies:
+  innim_lib:
+    version: ^1.0.0   # pinned deliberately
+    hosted: http://pub.example.org
+
+dev_dependencies:
+  test: ^1.0.0
+''');
+
+      expect(result, '''
+name: package_a
+# The library everything here is built on.
+dependencies:
+  innim_lib:
+    version: ^1.0.0   # pinned deliberately
+    hosted: https://pub.example.org
+
+dev_dependencies:
+  test: ^1.0.0
+''');
+    });
+
+    test('a quoted url keeps its quotes', () {
+      var result = rewrite('''
+dependencies:
+  innim_lib:
+    hosted: "http://pub.example.org"
+''');
+
+      expect(result, contains('hosted: "https://pub.example.org"'));
+    });
+
+    test('the structured form is rewritten in place', () {
+      var result = rewrite('''
+dependencies:
+  innim_lib:
+    hosted:
+      name: innim_lib
+      url: http://pub.example.org
+    version: ^1.0.0
+''');
+
+      expect(result, contains('      url: https://pub.example.org'));
+      expect(result, contains('      name: innim_lib'));
+    });
+
+    test('several dependencies in one file are all rewritten', () {
+      var result = rewrite('''
+dependencies:
+  a:
+    hosted: http://pub.example.org
+  b:
+    hosted: http://pub.example.org
+  c:
+    hosted: https://elsewhere.example.com
+dev_dependencies:
+  d:
+    hosted: http://pub.example.org
+''');
+
+      expect('https://pub.example.org'.allMatches(result!).length, 3);
+      expect(result, contains('hosted: https://elsewhere.example.com'));
+    });
+
+    test('nothing to change returns null rather than a copy', () {
+      expect(rewrite('''
+dependencies:
+  innim_lib:
+    hosted: https://pub.example.org
+'''), isNull);
+    });
+
+    test('git, path and sdk dependencies are untouched', () {
+      expect(rewrite('''
+dependencies:
+  a:
+    git:
+      url: http://pub.example.org/a.git
+  b:
+    path: ../b
+  c:
+    sdk: flutter
+'''), isNull);
+    });
+
+    test('a lookalike hostname is untouched', () {
+      expect(rewrite('''
+dependencies:
+  a:
+    hosted: http://pub.example.org.attacker.test
+'''), isNull);
+    });
+
+    test('a file that is not valid yaml is left alone', () {
+      expect(rewrite('name: [unclosed\n'), isNull);
+    });
+
+    test('switched off, it changes nothing', () {
+      expect(rewrite('''
+dependencies:
+  a:
+    hosted: http://pub.example.org
+''', using: HostedUrlCompat.disabled()), isNull);
+    });
+  });
+}
+
+/// The archive path: what a client actually downloads.
+void _archiveGroup() {
+  final canonical = Uri.parse('https://pub.example.org');
+
+  List<int> archiveWith(String pubspec, {String library = 'const a = 1;\n'}) {
+    var archive = Archive();
+    void add(String name, String content, {int mode = 420}) {
+      var bytes = utf8.encode(content);
+      archive.addFile(ArchiveFile(name, bytes.length, bytes)
+        ..mode = mode
+        ..lastModTime = 1600000000);
+    }
+
+    add('pubspec.yaml', pubspec);
+    add('lib/a.dart', library);
+    add('bin/run.sh', '#!/bin/sh\n', mode: 493);
+    return GZipEncoder().encode(TarEncoder().encode(archive))!;
+  }
+
+  ArchiveFile fileIn(List<int> bytes, String name) => TarDecoder()
+      .decodeBytes(GZipDecoder().decodeBytes(bytes))
+      .files
+      .firstWhere((f) => f.name == name);
+
+  const legacyPubspec = '''
+name: package_a
+version: 1.0.0
+dependencies:
+  innim_lib:
+    hosted: http://pub.example.org
+    version: ^1.0.0
+''';
+
+  group('the archive', () {
+    test('comes back with the pubspec rewritten', () {
+      var result = HostedUrlCompat()
+          .rewriteArchive(archiveWith(legacyPubspec), canonical: canonical);
+
+      expect(result, isNotNull);
+      expect(utf8.decode(fileIn(result!, 'pubspec.yaml').content as List<int>),
+          contains('hosted: https://pub.example.org'));
+    });
+
+    test('every other file is carried through, mode and timestamp included',
+        () {
+      var result = HostedUrlCompat()
+          .rewriteArchive(archiveWith(legacyPubspec), canonical: canonical)!;
+
+      var script = fileIn(result, 'bin/run.sh');
+      expect(script.mode, 493, reason: 'an executable bit must survive');
+      expect(script.lastModTime, 1600000000);
+      expect(utf8.decode(fileIn(result, 'lib/a.dart').content as List<int>),
+          'const a = 1;\n');
+      // The rewritten pubspec keeps its own metadata too.
+      expect(fileIn(result, 'pubspec.yaml').lastModTime, 1600000000);
+    });
+
+    test('the gzip header carries no timestamp', () {
+      // Without this the bytes differ every second, and the equality check
+      // below would pass only because both calls landed in the same one.
+      var result = HostedUrlCompat()
+          .rewriteArchive(archiveWith(legacyPubspec), canonical: canonical)!;
+
+      expect(result.sublist(0, 2), [0x1f, 0x8b], reason: 'gzip magic');
+      expect(result.sublist(4, 8), [0, 0, 0, 0],
+          reason: 'the MTIME field, which GZipEncoder fills with the clock');
+    });
+
+    test('the same input always produces the same bytes', () {
+      var compat = HostedUrlCompat();
+      var input = archiveWith(legacyPubspec);
+
+      var first = compat.rewriteArchive(input, canonical: canonical)!;
+      var second = compat.rewriteArchive(input, canonical: canonical)!;
+
+      expect(first, second,
+          reason: 'pub records a content hash and checks the cached copy '
+              'against it, so a moving one would be worse than the problem '
+              'this fixes');
+    });
+
+    test('an archive naming no old address is left for the caller to stream',
+        () {
+      var current = legacyPubspec.replaceAll('http://', 'https://');
+
+      expect(
+          HostedUrlCompat()
+              .rewriteArchive(archiveWith(current), canonical: canonical),
+          isNull);
+    });
+
+    test('an archive with no pubspec is left alone', () {
+      var archive = Archive();
+      var bytes = utf8.encode('nothing here');
+      archive.addFile(ArchiveFile('README.md', bytes.length, bytes));
+
+      expect(
+          HostedUrlCompat().rewriteArchive(
+              GZipEncoder().encode(TarEncoder().encode(archive))!,
+              canonical: canonical),
+          isNull);
+    });
+
+    test('bytes that are not an archive are left alone rather than refused',
+        () {
+      expect(
+          HostedUrlCompat().rewriteArchive(utf8.encode('not a tarball'),
+              canonical: canonical),
+          isNull);
+    });
+
+    test('switched off, it does nothing', () {
+      expect(
+          HostedUrlCompat.disabled()
+              .rewriteArchive(archiveWith(legacyPubspec), canonical: canonical),
+          isNull);
     });
   });
 }

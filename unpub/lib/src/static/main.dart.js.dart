@@ -15637,6 +15637,8 @@ A.N.prototype={
 ag(a,b,c){var s=0,r=A.ac(t.H),q,p=this,o
 var \$async\$ag=A.ad(function(d,e){if(d===1)return A.a9(e,r)
 for(;;)switch(s){case 0:p.f=c.c.i(0,"tab")==="sessions"?"sessions":"tokens"
+o=document
+o.title="Account | in_pub"
 if(p.c!=null){o=b==null?null:b.gjh()
 o=o===c.gjh()}else o=!1
 if(o){s=1
@@ -17197,9 +17199,11 @@ if(s!=null)s.aQ(0)
 r.Q=null
 r.cC()}}
 A.ap.prototype={
-ag(a,b,c){var s=0,r=A.ac(t.H),q=this
+ag(a,b,c){var s=0,r=A.ac(t.H),q=this,p
 var \$async\$ag=A.ad(function(d,e){if(d===1)return A.a9(e,r)
-for(;;)switch(s){case 0:s=2
+for(;;)switch(s){case 0:p=document
+p.title="Administration | in_pub"
+s=2
 return A.a4(q.de(),\$async\$ag)
 case 2:return A.aa(null,r)}})
 return A.ab(\$async\$ag,r)},
@@ -17754,6 +17758,10 @@ s=m!=null?2:3
 break
 case 2:n.d=m
 n.e=l
+k=l==null?m:m+" "+l
+j=document
+j.toString
+j.title=k.length===0?"in_pub":k+" | in_pub"
 n.r=n.c=!1
 g.a=!0
 q=5
@@ -17764,12 +17772,11 @@ case 8:n.b=e.a(a0)
 n.c=!0
 s=9
 return A.a4(A.zT(new A.bw(0),t.z),\$async\$ag)
-case 9:k=document
-j=k.querySelector("#readme")
-if(j!=null){i=n.b.r
+case 9:k=j.querySelector("#readme")
+if(k!=null){i=n.b.r
 i=i==null?null:A.xS(i,\$.vq())
 if(i==null)i=""
-J.vJ(j,i,\$.vw())}k=k.querySelector("#changelog")
+J.vJ(k,i,\$.vw())}k=j.querySelector("#changelog")
 if(k!=null){j=n.b.w
 j=j==null?null:A.xS(j,\$.vq())
 if(j==null)j=""
@@ -18591,11 +18598,13 @@ s.aA()}s=this.b
 s===\$&&A.a("componentView")
 s.b_()}}
 A.aN.prototype={
-ag(a,b,c){var s=0,r=A.ac(t.H),q=1,p=[],o=[],n=this,m,l
+ag(a,b,c){var s=0,r=A.ac(t.H),q=1,p=[],o=[],n=this,m,l,k
 var \$async\$ag=A.ad(function(d,e){if(d===1){p.push(e)
-s=q}for(;;)switch(s){case 0:l=n.a
-l.b=""
-l.a=!0
+s=q}for(;;)switch(s){case 0:k=n.a
+k.b=""
+l=document
+l.title="in_pub"
+k.a=!0
 q=2
 s=5
 return A.a4(A.zU(A.m([n.cA(new A.pw(n)),n.cA(new A.px(n))],t.dz),t.O),\$async\$ag)
@@ -18608,7 +18617,7 @@ s=3
 break
 case 2:o=[1]
 case 3:q=1
-l.a=!1
+k.a=!1
 s=o.pop()
 break
 case 4:return A.aa(null,r)
@@ -18974,21 +18983,27 @@ aA(){var s=0,r=A.ac(t.b)
 var \$async\$aA=A.ad(function(a,b){if(a===1)return A.a9(b,r)
 for(;;)switch(s){case 0:return A.aa(null,r)}})
 return A.ab(\$async\$aA,r)},
-ag(a,b,c){var s=0,r=A.ac(t.H),q=this,p,o,n,m
+ag(a,b,c){var s=0,r=A.ac(t.H),q=this,p,o,n,m,l
 var \$async\$ag=A.ad(function(d,e){if(d===1)return A.a9(e,r)
 for(;;)switch(s){case 0:p=c.c
 o=q.b=p.i(0,"q")
 n=q.a
-n.b=o==null?"":o
+m=o==null
+n.b=m?"":o
+m=m?null:o.length===0
+o=m!==!1?"Packages":"Search: "+A.E(o)
+m=document
+m.toString
+m.title=o.length===0?"in_pub":o+" | in_pub"
 p=p.i(0,"page")
 p=A.uH(p==null?"0":p,null)
 if(p==null)p=0
 q.c=p
 n.a=!0
-m=t.id
+l=t.id
 s=2
 return A.a4(n.cQ(p,q.b,10),\$async\$ag)
-case 2:q.d=m.a(e)
+case 2:q.d=l.a(e)
 q.e=!0
 n.a=!1
 return A.aa(null,r)}})

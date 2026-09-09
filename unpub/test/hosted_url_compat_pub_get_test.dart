@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
 import 'package:in_pub/in_pub.dart';
 import 'package:path/path.dart' as path;
 import 'package:test/test.dart';
@@ -79,7 +81,7 @@ void main() {
   /// Starts the repository with [compat] and returns the address it answers
   /// on. Both stores are rebuilt each time so a test cannot see another's
   /// leftovers.
-  Future<String> serve(HostedUrlCompat compat) async {
+  Future<String> serveOn(int port, HostedUrlCompat compat) async {
     var meta = _MemoryMetaStore();
     // Published today, against the current address.
     await publish(meta, 'package_b', pubspecYaml('package_b', '1.0.0'));
@@ -88,7 +90,7 @@ void main() {
       metaStore: meta,
       packageStore: FileStore(packages.path),
       hostedUrlCompat: compat,
-    ).serve('127.0.0.1', 0);
+    ).serve('127.0.0.1', port);
     var url = 'http://localhost:${server.port}';
 
     // Published long ago, against the address this repository has since left.
@@ -101,10 +103,12 @@ void main() {
     return url;
   }
 
+  Future<String> serve(HostedUrlCompat compat) => serveOn(0, compat);
+
   /// Runs `dart pub get` in [work] against the server, with a cache of its
   /// own so no test can be answered from another's.
-  Future<ProcessResult> pubGet() async {
-    var cache = Directory(path.join(work.path, 'pub-cache'))
+  Future<ProcessResult> pubGet({String cacheName = 'pub-cache'}) async {
+    var cache = Directory(path.join(work.path, cacheName))
       ..createSync(recursive: true);
     return Process.run(
       Platform.resolvedExecutable,
@@ -160,33 +164,100 @@ dependencies:
         reason: 'the old address is what the solver cannot reconcile');
   }, timeout: const Timeout(Duration(minutes: 2)));
 
-  test('with the rewrite, the same graph resolves', () async {
+  test('with the rewrite, the same graph resolves — and keeps resolving',
+      () async {
     hostedUrl = await serve(HostedUrlCompat(legacyUrls: [legacy]));
     writeApp();
 
-    var result = await pubGet();
+    var first = await pubGet();
+    expect(first.exitCode, 0,
+        reason: 'stdout: ${first.stdout}\nstderr: ${first.stderr}');
 
-    expect(result.exitCode, 0,
-        reason: 'stdout: ${result.stdout}\nstderr: ${result.stderr}');
+    // The run that matters, and the one this test used to be missing. Pub
+    // reads a hosted package's dependencies from the version listing only
+    // while the package is not yet in its cache; from the second run on it
+    // reads the copy it extracted. A rewrite that stops at the metadata
+    // passes the first run and fails here, which is exactly how it reached
+    // production looking correct.
+    var second = await pubGet();
+    expect(second.exitCode, 0,
+        reason: 'a second `pub get` on a warm cache must resolve too.\n'
+            'stdout: ${second.stdout}\nstderr: ${second.stderr}');
 
     var lock = File(path.join(work.path, 'pubspec.lock')).readAsStringSync();
     expect(lock, contains('package_a'));
     expect(lock, contains('package_b'));
     expect(lock, isNot(contains(legacy.host)),
         reason: 'nothing may still be resolved against the old address');
-    // The archive still holds the pubspec as it was published: the rewrite
-    // never touched it, and pub extracted it unchanged.
-    var cached = Directory(path.join(work.path, 'pub-cache', 'hosted'));
-    var extracted = cached
+
+    // Which is only true because the copy pub kept names this server.
+    expect(_cachedPubspec(work, 'package_a'), isNot(contains(legacy.host)));
+    expect(_cachedPubspec(work, 'package_a'), contains(hostedUrl));
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('the archive is byte-identical on every request', () async {
+    // A moving content hash would be worse than the problem it fixes: pub
+    // records one in `pubspec.lock` and checks the cached copy against it.
+    hostedUrl = await serve(HostedUrlCompat(legacyUrls: [legacy]));
+    var url = Uri.parse('$hostedUrl/packages/package_a/versions/1.0.0.tar.gz');
+
+    var first = await http.readBytes(url);
+    var second = await http.readBytes(url);
+
+    expect(sha256.convert(first), sha256.convert(second));
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('a package published since the move is served untouched', () async {
+    hostedUrl = await serve(HostedUrlCompat(legacyUrls: [legacy]));
+
+    var served = await http.readBytes(
+        Uri.parse('$hostedUrl/packages/package_b/versions/1.0.0.tar.gz'));
+    var stored = File(path.join(packages.path, 'package_b-1.0.0.tar.gz'))
+        .readAsBytesSync();
+
+    expect(served, stored,
+        reason: 'nothing in it names an old address, so nothing is unpacked');
+  }, timeout: const Timeout(Duration(minutes: 2)));
+
+  test('a cache holding the old copy is not repaired without clearing it',
+      () async {
+    // The state every consumer is in today: the package was extracted while
+    // the repository still served the archive as published, so the copy pub
+    // keeps names the old address. Constructed by putting that copy back,
+    // which is exactly what is on their disk.
+    hostedUrl = await serve(HostedUrlCompat(legacyUrls: [legacy]));
+    writeApp();
+    expect((await pubGet()).exitCode, 0);
+
+    var cached = _cachedPubspecFile(work, 'package_a');
+    cached.writeAsStringSync(
+        cached.readAsStringSync().replaceAll(hostedUrl, legacy.toString()));
+
+    var stale = await pubGet();
+    expect(stale.exitCode, isNot(0),
+        reason: 'pub does not re-download what it already has, so the old '
+            'extracted pubspec goes on naming the old address');
+
+    // Clearing the cache is the one thing a consumer has to do by hand, and
+    // then it holds — rather than working for exactly one run, which is what
+    // rewriting only the metadata bought.
+    expect((await pubGet(cacheName: 'pub-cache-2')).exitCode, 0);
+    expect((await pubGet(cacheName: 'pub-cache-2')).exitCode, 0);
+  }, timeout: const Timeout(Duration(minutes: 3)));
+}
+
+/// The `pubspec.yaml` pub extracted for [name], which is what every solve
+/// after the first one reads.
+String _cachedPubspec(Directory work, String name) =>
+    _cachedPubspecFile(work, name).readAsStringSync();
+
+File _cachedPubspecFile(Directory work, String name) =>
+    Directory(path.join(work.path, 'pub-cache', 'hosted'))
         .listSync(recursive: true)
         .whereType<File>()
         .firstWhere((f) =>
             path.basename(f.path) == 'pubspec.yaml' &&
-            path.basename(f.parent.path).startsWith('package_a-'));
-    expect(extracted.readAsStringSync(), contains(legacy.toString()),
-        reason: 'the published archive is left exactly as it was');
-  }, timeout: const Timeout(Duration(minutes: 2)));
-}
+            path.basename(f.parent.path).startsWith('$name-'));
 
 Map<String, dynamic> _loadYaml(String yaml) {
   // Only what these fixtures write, so the test does not depend on a yaml

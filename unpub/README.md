@@ -389,7 +389,15 @@ consumer, or serve the old metadata under the new address.
 
 The server can do the third, when asked. Switched on, it looks at every
 repository API answer it sends over https: a dependency naming the *same*
-address over plain http is served as https instead.
+address over plain http is served as https instead — and it does the same to
+the `pubspec.yaml` inside the archive on its way out.
+
+Both halves are needed, and the second is not obvious. `dart pub` reads a
+hosted package's dependencies from the version listing **only while that
+package is not yet in the local cache**; once it has been extracted into
+`$PUB_CACHE/hosted/<host>/<package>-<version>/`, every later solve reads that
+copy instead. Rewriting the metadata alone therefore fixes exactly one
+`pub get` per cleared cache and then the conflict comes back.
 
 ```sh
 dart pub global run in_pub --proxy-origin https://pub.example.org \
@@ -410,11 +418,30 @@ Pub compatibility rewrite: package=innim_iap_google_apple version=1.0.0
 dependency=innim_lib from=http://pub.example.org to=https://pub.example.org
 ```
 
-Nothing stored changes. Archives keep the `pubspec.yaml` they were published
-with, their content hashes stay valid, no version number moves, and switching
-the layer off again restores the previous answers exactly — there is nothing
-to migrate back. It also does not excuse a bad publish: new versions should
-name the https address, and one that already does is left untouched.
+Nothing stored changes: the archive on disk keeps the `pubspec.yaml` it was
+published with, no version number moves, and switching the layer off restores
+the previous answers exactly — there is nothing to migrate back. Inside the
+archive only that one url differs; comments, quoting, key order, file modes
+and timestamps are all carried through, and the output is a deterministic
+function of the input, so the bytes a client receives do not move between
+requests or restarts. It also does not excuse a bad publish: new versions
+should name the https address, and one that already does is served untouched,
+without being unpacked at all.
+
+### What consumers have to do once
+
+Because the archive a client downloads now differs from the one it downloaded
+before, its content hash differs too, and a cache already holding the old copy
+is not repaired — pub does not re-download what it already has. Each consumer
+needs one:
+
+```sh
+dart pub cache clean
+```
+
+The next `pub get` reports that the hash in `pubspec.lock` is out of date,
+updates it, and succeeds. `pubspec.lock` does not need deleting, and it does
+not have to be done again.
 
 Only this repository's own address is rewritten. A dependency on another
 hosted repository, on `git`, `path` or an sdk, is served as published, and the
@@ -430,6 +457,12 @@ The address rewritten *to* is the one the server is answering on, which
 behind a TLS-terminating proxy means `--proxy-origin` has to be set — the
 same setting the archive urls already depend on. Without it the server sees
 its own plain-http address, finds no https counterpart, and rewrites nothing.
+
+A package store that hands out its own download urls (`supportsDownloadUrl`,
+as an object store would) is a redirect: the bytes never pass through this
+server, so the pubspec inside cannot be rewritten and the layer can only fix
+the first resolution. The server says so, once per package, when it happens.
+The built-in `FileStore` streams through and is unaffected.
 
 Rewriting happens on the way out, and this server holds no metadata cache, so
 there is nothing to invalidate. The pub client does keep one, at
