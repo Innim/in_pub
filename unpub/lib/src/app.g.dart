@@ -75,6 +75,11 @@ Router _$AppRouter(App service) {
   );
   router.add(
     'GET',
+    r'/webapi/recent',
+    service.getRecentPublications,
+  );
+  router.add(
+    'GET',
     r'/packages/<name>.json',
     service.getPackageVersions,
   );

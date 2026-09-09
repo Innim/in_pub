@@ -61,6 +61,18 @@ class UnpubPackage {
       _$UnpubPackageFromJson(map);
 }
 
+/// One version of one package going up.
+///
+/// The store returns these rather than packages because what is being
+/// ordered is the publications themselves: a package that has had two
+/// versions published is two of them, and neither is "the package".
+class UnpubRecentPublication {
+  final String package;
+  final UnpubVersion version;
+
+  UnpubRecentPublication(this.package, this.version);
+}
+
 @JsonSerializable()
 class UnpubQueryResult {
   int count;

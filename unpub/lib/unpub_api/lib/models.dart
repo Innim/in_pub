@@ -29,6 +29,38 @@ class ListApiPackage {
   Map<String, dynamic> toJson() => _$ListApiPackageToJson(this);
 }
 
+/// One publication: a version of a package that went up, and when.
+///
+/// The home page's recent list is a feed of these rather than a list of
+/// packages, so a package published twice appears twice. [version] is the
+/// version that was published, which is not always the package's newest one
+/// — a fix released on an older line is a publication too.
+@JsonSerializable()
+class RecentApiPublication {
+  String name;
+  String version;
+  String? description;
+  DateTime publishedAt;
+
+  RecentApiPublication(
+      this.name, this.version, this.description, this.publishedAt);
+
+  factory RecentApiPublication.fromJson(Map<String, dynamic> map) =>
+      _$RecentApiPublicationFromJson(map);
+  Map<String, dynamic> toJson() => _$RecentApiPublicationToJson(this);
+}
+
+@JsonSerializable()
+class RecentApi {
+  List<RecentApiPublication> publications;
+
+  RecentApi(this.publications);
+
+  factory RecentApi.fromJson(Map<String, dynamic> map) =>
+      _$RecentApiFromJson(map);
+  Map<String, dynamic> toJson() => _$RecentApiToJson(this);
+}
+
 @JsonSerializable()
 class DetailViewVersion {
   String version;

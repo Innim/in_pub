@@ -484,4 +484,80 @@ main() {
       });
     });
   });
+
+  group('recent publications', () {
+    late MongoStore store;
+
+    // Written straight into the collection rather than published through the
+    // API: what is under test is the aggregation, and it has to see versions
+    // whose publication dates are days apart and out of version order, which
+    // publishing here and now cannot produce.
+    Map<String, dynamic> _version(String version, DateTime createdAt) => {
+          'version': version,
+          'createdAt': createdAt,
+          'uploader': email0,
+          'pubspec': {'name': package0, 'version': version},
+        };
+
+    setUpAll(() async {
+      await _cleanUpDb();
+      store = MongoStore(_db);
+
+      await _db.collection(packageCollection).insertAll([
+        {
+          'name': package0,
+          'private': true,
+          'download': 0,
+          'uploaders': [email0],
+          'createdAt': DateTime.utc(2026, 1, 1),
+          'updatedAt': DateTime.utc(2026, 9, 8),
+          'versions': [
+            _version('2.0.0', DateTime.utc(2026, 9, 6)),
+            // Published last, on the older line: newest publication, and not
+            // the package's newest version.
+            _version('1.9.1', DateTime.utc(2026, 9, 8)),
+            _version('1.9.0', DateTime.utc(2026, 8, 9)),
+          ],
+        },
+        {
+          'name': package1,
+          'private': true,
+          'download': 0,
+          'uploaders': [email0],
+          'createdAt': DateTime.utc(2026, 1, 1),
+          'updatedAt': DateTime.utc(2026, 9, 7),
+          'versions': [_version('1.0.9', DateTime.utc(2026, 9, 7))],
+        },
+      ]);
+    });
+
+    test('one entry per version, newest publication first', () async {
+      var recent = await store.queryRecentPublications(size: 10);
+
+      expect(
+          recent.map((e) => [e.package, e.version.version]),
+          [
+            [package0, '1.9.1'],
+            [package1, '1.0.9'],
+            [package0, '2.0.0'],
+            [package0, '1.9.0'],
+          ],
+          reason: 'the versions of one package are separate entries, ordered '
+              'by when each was published rather than by version');
+    });
+
+    test('an entry carries the version that was published', () async {
+      var newest = (await store.queryRecentPublications(size: 1)).single;
+
+      expect(newest.package, package0);
+      expect(newest.version.version, '1.9.1');
+      expect(newest.version.createdAt, DateTime.utc(2026, 9, 8));
+    });
+
+    test('size bounds the feed, cutting it at the newest', () async {
+      var recent = await store.queryRecentPublications(size: 2);
+
+      expect(recent.map((e) => e.version.version), ['1.9.1', '1.0.9']);
+    });
+  });
 }

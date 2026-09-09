@@ -46,6 +46,9 @@ const authOnlyRoutes = SpaRoutePaths.authOnly;
 class App {
   static const proxyOriginHeader = "proxy-origin";
 
+  /// The most publications `/webapi/recent` will answer with at once.
+  static const _maxRecentPublications = 100;
+
   /// meta information store
   final MetaStore metaStore;
 
@@ -1208,6 +1211,38 @@ class App {
             primary.version,
             package.updatedAt,
           )
+    ]);
+
+    return _okWithJson({'data': data.toJson()});
+  }
+
+  /// The publication feed the home page opens with.
+  ///
+  /// Separate from `/webapi/packages` because it answers with something else:
+  /// that endpoint lists packages, and a package can only appear in it once,
+  /// carrying its newest version. What "recently published" is a list of is
+  /// publications — a package released twice today is two of them, and the
+  /// version each entry names is the one that went up, not the highest one
+  /// the package has.
+  @Route.get('/webapi/recent')
+  Future<shelf.Response> getRecentPublications(shelf.Request req) async {
+    var params = req.requestedUri.queryParameters;
+    var size = int.tryParse(params['size'] ?? '') ?? 10;
+    // Capped, unlike the package list: this one is aggregated over every
+    // version of every package, so the work an unbounded `size` asks for
+    // grows with the whole repository rather than with a page of it.
+    size = size.clamp(1, _maxRecentPublications);
+
+    final publications = await metaStore.queryRecentPublications(size: size);
+
+    var data = RecentApi([
+      for (var publication in publications)
+        RecentApiPublication(
+          publication.package,
+          publication.version.version,
+          publication.version.pubspec['description'] as String?,
+          publication.version.createdAt,
+        )
     ]);
 
     return _okWithJson({'data': data.toJson()});

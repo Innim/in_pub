@@ -226,6 +226,13 @@ class AppService {
     return ListApi.fromJson(res);
   }
 
+  /// The publication feed: the versions most recently published, newest
+  /// first. A package published twice is two entries.
+  Future<RecentApi> fetchRecentPublications({int? size}) async {
+    var res = await _fetch('/webapi/recent', {'size': size});
+    return RecentApi.fromJson(res);
+  }
+
   Future<WebapiDetailView> fetchPackage(String name, String? version) async {
     version = version ?? 'latest';
     var res = await _fetch('/webapi/package/$name/$version');

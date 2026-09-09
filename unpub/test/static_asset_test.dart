@@ -319,6 +319,11 @@ class _UnusedMetaStore extends MetaStore {
   @override
   void increaseDownloads(String name, String version) => _unused();
   @override
+  Future<List<UnpubRecentPublication>> queryRecentPublications({
+    required int size,
+  }) =>
+      _unused();
+  @override
   Future<UnpubQueryResult> queryPackages({
     required int size,
     required int page,
